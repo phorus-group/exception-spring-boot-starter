@@ -21,7 +21,7 @@ ext["jackson-bom.version"] = "3.1.0"
 
 group = "group.phorus"
 description = "Spring Boot WebFlux autoconfiguration for the Phorus exception handling library."
-version = "1.0.0"
+version = "1.0.1"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -75,19 +75,18 @@ tasks {
     jacocoTestReport {
         executionData.setFrom(fileTree(project.layout.buildDirectory).include("/jacoco/*.exec"))
 
-        afterEvaluate {
-            classDirectories.setFrom(files(classDirectories.files.map {
-                fileTree(it) {
-                    exclude(
-                        "**/model/**",
-                        "**/dtos/**",
-                        "**/config/**",
-                        "**/repositories/**",
-                        "**/*Application*",
-                    )
-                }
-            }))
-        }
+        classDirectories.setFrom(
+            sourceSets.main.get().output.classesDirs.map { dir ->
+                fileTree(dir).exclude(
+                    "**/model/**",
+                    "**/dtos/**",
+                    "**/config/**",
+                    "**/repositories/**",
+                    "**/*Application*",
+                )
+            }
+        )
+
 
         reports {
             xml.required.set(true)
@@ -155,6 +154,7 @@ afterEvaluate {
         dependsOn("dokkaJavadocJar")
     }
 }
+
 
 mavenPublishing {
     coordinates(
