@@ -1,0 +1,6 @@
+group.phorus.exception.config.SourceResolver
+group.phorus.exception.config.WebfluxValidatorConfig
+group.phorus.exception.handlers.WebfluxExceptionHandler
+group.phorus.exception.handlers.RestExceptionHandler
+group.phorus.exception.config.OpenApiAutoConfiguration
+group.phorus.exception.config.MetricsRecorder
