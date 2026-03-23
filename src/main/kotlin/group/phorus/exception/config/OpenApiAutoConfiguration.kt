@@ -15,10 +15,24 @@ import org.springframework.boot.autoconfigure.AutoConfiguration
 private const val API_ERROR_SCHEMA_NAME = "ApiError"
 private const val API_ERROR_REF = "#/components/schemas/$API_ERROR_SCHEMA_NAME"
 
+/**
+ * Autoconfiguration that registers [ApiError] and [ValidationError] schemas
+ * in the OpenAPI spec and adds a default error response to all operations.
+ *
+ * Only active when springdoc-openapi is on the classpath.
+ *
+ * The customizer:
+ * 1. Registers [ApiError] and [ValidationError] as reusable component schemas.
+ * 2. Adds a `default` response referencing the `ApiError` schema with content type
+ *    `application/problem+json` to every operation that does not already define one.
+ */
 @AutoConfiguration
 @ConditionalOnClass(name = ["org.springdoc.core.customizers.OpenApiCustomizer"])
 class OpenApiAutoConfiguration {
 
+    /**
+     * Creates an [OpenApiCustomizer] that registers error schemas and default error responses.
+     */
     @Bean
     fun apiErrorSchemaAndResponses(): OpenApiCustomizer =
         OpenApiCustomizer { openApi ->

@@ -17,11 +17,18 @@ import jakarta.validation.ParameterNameProvider
 import kotlin.reflect.jvm.kotlinFunction
 
 /**
- * Needed to make the "@Validated" annotation work, used to add support for adding @Valid to collections
- * directly inside a RestController.
+ * Autoconfiguration that replaces the default [LocalValidatorFactoryBean] with a
+ * [CustomLocalValidatorFactoryBean] to support `@Validated` on controller method
+ * parameters, including `@Valid` on collection elements inside `@RestController` methods.
+ *
+ * Loads before [ValidationAutoConfiguration] so that the custom validator takes precedence.
  */
 @AutoConfiguration(before = [ValidationAutoConfiguration::class])
 class WebfluxValidatorConfig {
+    /**
+     * Registers a primary [LocalValidatorFactoryBean] that uses Kotlin-aware parameter
+     * name discovery and a custom message interpolator.
+     */
     @Primary
     @Bean
     @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
@@ -32,6 +39,10 @@ class WebfluxValidatorConfig {
     }
 }
 
+/**
+ * Extended [LocalValidatorFactoryBean] that configures Kotlin-aware parameter name
+ * discovery (including suspend functions) and uses Hibernate Validator's default clock provider.
+ */
 class CustomLocalValidatorFactoryBean : LocalValidatorFactoryBean() {
     override fun getClockProvider(): ClockProvider = DefaultClockProvider.INSTANCE
     override fun postProcessConfiguration(configuration: jakarta.validation.Configuration<*>) {
@@ -56,6 +67,15 @@ class CustomLocalValidatorFactoryBean : LocalValidatorFactoryBean() {
     }
 }
 
+/**
+ * [ParameterNameDiscoverer] that delegates to [KotlinReflectionParameterNameDiscoverer]
+ * and appends an extra empty-string entry for Kotlin suspend functions.
+ *
+ * Suspend functions compile to a method with an additional `Continuation` parameter.
+ * The standard Kotlin discoverer does not account for it, which causes parameter name
+ * arrays to be shorter than the actual method parameter list. This discoverer detects
+ * suspend functions and pads the array so that validation parameter names align correctly.
+ */
 class SuspendAwareKotlinParameterNameDiscoverer : ParameterNameDiscoverer {
 
     private val defaultProvider = KotlinReflectionParameterNameDiscoverer()
