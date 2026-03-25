@@ -43,6 +43,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-jackson")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-configuration-processor")
+    implementation("org.springframework:spring-tx")
+
     // OpenAPI (optional, only active when springdoc is on classpath)
     compileOnly("org.springdoc:springdoc-openapi-starter-webflux-api:3.0.2")
 
