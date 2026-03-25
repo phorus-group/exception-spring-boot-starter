@@ -36,7 +36,7 @@ repositories {
 dependencies {
     // Phorus
     api("group.phorus:exception-core:1.0.0")
-    implementation("group.phorus:metrics-commons:2.0.3")
+    implementation("group.phorus:metrics-commons:2.0.2")
 
     // Spring
     implementation("org.springframework.boot:spring-boot-starter-webflux")
