@@ -1,0 +1,6 @@
+# Jackson Core 3.x - Document length constraint bypass
+# No fixed version available yet. This vulnerability requires an attacker to
+# control the input document length constraints, which is not applicable in
+# this library's usage context.
+# See: https://github.com/advisories/GHSA-2m67-wjpj-xhg9
+GHSA-2m67-wjpj-xhg9
