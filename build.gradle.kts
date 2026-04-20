@@ -23,7 +23,7 @@ ext["spring-framework.version"] = "7.0.6"
 
 group = "group.phorus"
 description = "Spring Boot WebFlux autoconfiguration for the Phorus exception handling library."
-version = "1.0.1"
+version = "1.0.2"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
