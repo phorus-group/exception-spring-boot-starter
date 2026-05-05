@@ -637,11 +637,18 @@ data class CreateUserRequest(
     @field:NotBlank
     @field:Size(min = 2, max = 50)
     val name: String?,
+    @field:Past
+    val publishedAt: LocalDate?,
+    @field:AssertTrue
+    val acceptedTos: Boolean?,
 )
 ```
 
 springdoc auto-publishes the DTO at `/v3/api-docs` with the `x-validations`
-extension wired alongside the standard JSON Schema validators.
+extension wired alongside the standard JSON Schema validators. Constraints
+that have a JSON Schema cousin (`@Size`) end up as `minLength` / `maxLength`
+next to the property, the synthetic ones (`@NotBlank`, `@Past`,
+`@AssertTrue`) appear only in `x-validations`.
 
 <details>
 <summary>OpenAPI fragment</summary>
@@ -663,6 +670,17 @@ CreateUserRequest:
           code: TOO_SHORT
         - rule: maxLength
           code: TOO_LONG
+    publishedAt:
+      type: string
+      format: date
+      x-validations:
+        - rule: past
+          code: MUST_BE_PAST
+    acceptedTos:
+      type: boolean
+      x-validations:
+        - rule: assertTrue
+          code: MUST_BE_TRUE
 ```
 
 </details>
@@ -693,23 +711,34 @@ Running `yarn orval` produces this:
 // src/api/generated/api.zod.ts (raw Orval output)
 export const createUserRequest = zod.strictObject({
   "name": zod.string().min(2).max(50),
+  "publishedAt": zod.iso.date(),
+  "acceptedTos": zod.boolean(),
 });
 ```
 
 Each Zod validator like `.min(N)` takes an optional second argument that
 becomes the error message Zod attaches to the issue when that validator
-fails. Orval emitted the validator values (`2`, `50`) read from
-`minLength` and `maxLength` in the JSON Schema, but no message. When
-validation fails Zod will fall back to its built-in English ("String must
-contain at least 2 character(s)") instead of the reserved code we want.
-Orval has no per-validator message hook, so the codes from `x-validations`
-are ignored entirely, and the FE-side messages diverge from the BE-side
-codes that the single-vocabulary contract depends on.
+fails. Orval emitted the validator values (`2`, `50`) read from `minLength`
+and `maxLength` in the JSON Schema, but no message. When validation fails
+Zod will fall back to its built-in English ("String must contain at least
+2 character(s)") instead of the reserved code we want. The synthetic-rule
+constraints fare worse, `@NotBlank` on `name`, `@Past` on `publishedAt`,
+and `@AssertTrue` on `acceptedTos` produce no Zod call at all because
+they have no JSON Schema cousin Orval could translate. The bare
+`zod.iso.date()` and `zod.boolean()` accept any date or any boolean. Orval
+has no per-validator message hook and no extension hook for synthetic
+rules, so without intervention the FE-side messages diverge from the BE
+codes that the single-vocabulary contract depends on, and the synthetic
+constraints are dropped entirely.
 
-A small post-processor closes the gap. It walks the generated file and
-rewrites each un-messaged call to carry the matching reserved code as its
-second argument, reading the rule-to-code mapping straight from the OpenAPI
-doc's `x-validations`.
+A post-processor closes the gap in two passes. First, it rewrites
+each un-messaged Zod method call (`.min`, `.max`, `.regex`, `.email`, etc.)
+to carry the matching reserved code as its second argument. Second, it
+injects `.refine(predicate, code)` calls for synthetic rules that have
+no JSON Schema cousin (`@NotBlank`, `@Past`, `@Future`, `@AssertTrue`,
+`@AssertFalse`, `@Null`, etc.). Without the second pass, those constraints
+would be silently dropped on the FE because Orval emits no Zod call for
+them at all.
 
 <details>
 <summary>scripts/inject-zod-messages.cjs</summary>
@@ -752,6 +781,24 @@ const RULE_TO_CODE = {
   assertFalse: "MUST_BE_FALSE",
 };
 
+// Synthetic rules need a fresh `.refine(predicate, code)` call appended,
+// because Orval emits nothing for them. Predicates accept null / undefined
+// so optional fields skip the refinement on missing values. Temporal
+// predicates compare at day granularity via setHours(0,0,0,0) so today's
+// date string compares equal to today's date string regardless of the
+// current wall-clock time, matching Jakarta @Past / @FutureOrPresent on a
+// LocalDate.
+const SYNTHETIC_REFINEMENTS = {
+  notBlank: 'refine(v => typeof v !== "string" || v.trim().length > 0, "BLANK")',
+  null: 'refine(v => v === null || v === undefined, "MUST_BE_NULL")',
+  past: 'refine(d => d == null || new Date(d).setHours(0,0,0,0) < new Date().setHours(0,0,0,0), "MUST_BE_PAST")',
+  pastOrPresent: 'refine(d => d == null || new Date(d).setHours(0,0,0,0) <= new Date().setHours(0,0,0,0), "MUST_BE_PAST_OR_PRESENT")',
+  future: 'refine(d => d == null || new Date(d).setHours(0,0,0,0) > new Date().setHours(0,0,0,0), "MUST_BE_FUTURE")',
+  futureOrPresent: 'refine(d => d == null || new Date(d).setHours(0,0,0,0) >= new Date().setHours(0,0,0,0), "MUST_BE_FUTURE_OR_PRESENT")',
+  assertTrue: 'refine(v => v === true, "MUST_BE_TRUE")',
+  assertFalse: 'refine(v => v === false, "MUST_BE_FALSE")',
+};
+
 function rewriteCalls(source, method, code) {
   const re = new RegExp(
     `\\.${method}\\((-?\\d+(?:\\.\\d+)?|[A-Za-z_$][A-Za-z0-9_$]*)\\)`,
@@ -776,10 +823,86 @@ function injectMessages(source, codes) {
   return out;
 }
 
+// Walk every operation under spec.paths and map its request-body schema's
+// synthetic refines onto the export name Orval will emit. Orval names body
+// schemas after the operationId, lowercase plus "Body" suffix, with a
+// numeric suffix on second-and-later occurrences of a duplicate operationId
+// (createBody, create1Body, create2Body, ...). Walks paths in spec order so
+// the suffix matches what Orval produces.
+const HTTP_METHODS = ["get", "post", "put", "patch", "delete", "head", "options"];
+
+function collectSyntheticInjections(spec) {
+  const injections = new Map();
+  const schemas = (spec && spec.components && spec.components.schemas) || {};
+  const paths = (spec && spec.paths) || {};
+  const seenOpIds = new Map();
+
+  for (const [, methods] of Object.entries(paths)) {
+    if (!methods || typeof methods !== "object") continue;
+    for (const methodName of Object.keys(methods)) {
+      if (!HTTP_METHODS.includes(methodName)) continue;
+      const op = methods[methodName];
+      if (!op || !op.operationId) continue;
+      const opId = op.operationId;
+      const occurrence = seenOpIds.get(opId) || 0;
+      seenOpIds.set(opId, occurrence + 1);
+
+      const body = op.requestBody && op.requestBody.content;
+      const json = body && body["application/json"];
+      const ref = json && json.schema && json.schema.$ref;
+      if (!ref || !ref.startsWith("#/components/schemas/")) continue;
+      const schema = schemas[ref.replace("#/components/schemas/", "")];
+      if (!schema || !schema.properties) continue;
+
+      const props = new Map();
+      for (const [propName, prop] of Object.entries(schema.properties)) {
+        const xv = prop && prop["x-validations"];
+        if (!Array.isArray(xv)) continue;
+        const calls = xv
+          .filter((e) => e && SYNTHETIC_REFINEMENTS[e.rule])
+          .map((e) => "." + SYNTHETIC_REFINEMENTS[e.rule]);
+        if (calls.length > 0) props.set(propName, calls);
+      }
+      if (props.size === 0) continue;
+      const suffix = occurrence === 0 ? "" : String(occurrence);
+      injections.set(`${opId}${suffix}Body`, props);
+    }
+  }
+  return injections;
+}
+
+// Append refines to each property's Zod chain. Line-based scan so it
+// tolerates Orval's multi-line nested objects in neighbouring properties.
+function applySyntheticInjections(source, injections) {
+  if (injections.size === 0) return source;
+  const lines = source.split("\n");
+  let currentExport = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const open = line.match(/^export const (\w+) = zod\.\w+\(\{$/);
+    if (open) { currentExport = open[1]; continue; }
+    if (/^}/.test(line)) { currentExport = null; continue; }
+    if (!currentExport) continue;
+    const propMatch = line.match(/^(\s+)"([^"]+)":\s*(.+?)(,?)\s*$/);
+    if (!propMatch) continue;
+    const [, indent, propName, chain, comma] = propMatch;
+    const refsByProp = injections.get(currentExport);
+    if (!refsByProp) continue;
+    const calls = refsByProp.get(propName);
+    if (!calls || calls.length === 0) continue;
+    if (calls.every((c) => chain.includes(c.slice(1)))) continue; // idempotent
+    lines[i] = `${indent}"${propName}": ${chain}${calls.join("")}${comma}`;
+  }
+  return lines.join("\n");
+}
+
 const repoRoot = resolve(__dirname, "..");
 const zodPath = resolve(repoRoot, "src/api/generated/api.zod.ts");
+const specPath = resolve(repoRoot, "openapi/api.json");
 const source = readFileSync(zodPath, "utf8");
-const rewritten = injectMessages(source, RULE_TO_CODE);
+const spec = JSON.parse(readFileSync(specPath, "utf8"));
+let rewritten = injectMessages(source, RULE_TO_CODE);
+rewritten = applySyntheticInjections(rewritten, collectSyntheticInjections(spec));
 if (rewritten !== source) writeFileSync(zodPath, rewritten, "utf8");
 ```
 
@@ -798,15 +921,26 @@ regenerates the client.
 }
 ```
 
-After `yarn api:generate` runs, the same generated file now carries the
-reserved codes as the Zod method's second argument.
+After `yarn api:generate` runs, the same generated file ends up like this:
 
 ```ts
 // src/api/generated/api.zod.ts (after the post-processor)
 export const createUserRequest = zod.strictObject({
-  "name": zod.string().min(2, "TOO_SHORT").max(50, "TOO_LONG"),
+  "name": zod.string()
+    .min(2, "TOO_SHORT")
+    .max(50, "TOO_LONG")
+    .refine(v => typeof v !== "string" || v.trim().length > 0, "BLANK"),
+  "publishedAt": zod.iso.date()
+    .refine(d => d == null || new Date(d).setHours(0,0,0,0) < new Date().setHours(0,0,0,0), "MUST_BE_PAST"),
+  "acceptedTos": zod.boolean()
+    .refine(v => v === true, "MUST_BE_TRUE"),
 });
 ```
+
+The `.min(2, "TOO_SHORT")` and `.max(50, "TOO_LONG")` come from the first
+pass rewriting Orval's bare calls. The trailing `.refine(...)` calls come
+from the second pass, since Orval emitted nothing for `@NotBlank`, `@Past`,
+or `@AssertTrue`.
 
 The mapping from `rule` to Zod method follows the JSON Schema vocabulary,
 `minLength` becomes `.min(N, code)`, `pattern` becomes `.regex(re, code)`,
