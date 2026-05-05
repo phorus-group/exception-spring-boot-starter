@@ -110,11 +110,28 @@ Feature: Exceptions are handled and a custom message is sent to the client
     And the response has status 400 and title "Bad Request"
     And the response contains code "VALIDATION_001"
 
-  Scenario: Exception without error code omits code from response
+  Scenario: Exception without explicit code falls back to the HTTP class reserved code
     Given the caller has an object that will result in a BadRequest exception
     When the external service calls the "/v1/testException" endpoint
     Then the service returns HTTP 400
-    And the response does not contain code
+    And the response contains code "BAD_REQUEST"
+
+  Scenario: NotFound exception without explicit code falls back to NOT_FOUND
+    Given the caller has an object that will result in a NotFound exception
+    When the external service calls the "/v1/testException" endpoint
+    Then the service returns HTTP 404
+    And the response contains code "NOT_FOUND"
+
+  Scenario: Conflict exception without explicit code falls back to CONFLICT
+    Given the caller has an object that will result in a Conflict exception
+    When the external service calls the "/v1/testException" endpoint
+    Then the service returns HTTP 409
+    And the response contains code "CONFLICT"
+
+  Scenario: Unhandled exception falls back to INTERNAL_SERVER_ERROR
+    When the external service calls the "/v1/testFail" endpoint
+    Then the service returns HTTP 500
+    And the response contains code "INTERNAL_SERVER_ERROR"
 
   Scenario: Source is auto-populated from spring.application.name
     Given the caller has an object that will result in a BadRequest exception

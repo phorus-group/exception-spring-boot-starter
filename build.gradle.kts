@@ -31,7 +31,7 @@ configurations.all {
 
 group = "group.phorus"
 description = "Spring Boot WebFlux autoconfiguration for the Phorus exception handling library."
-version = "1.0.2"
+version = "1.1.0"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -45,7 +45,7 @@ repositories {
 
 dependencies {
     // Phorus
-    api("group.phorus:exception-core:1.0.0")
+    api("group.phorus:exception-core:1.1.1")
     implementation("group.phorus:metrics-commons:2.0.2")
 
     // Spring

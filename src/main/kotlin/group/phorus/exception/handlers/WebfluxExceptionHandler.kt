@@ -2,6 +2,7 @@ package group.phorus.exception.handlers
 
 import tools.jackson.databind.ObjectMapper
 import group.phorus.exception.core.BaseException
+import group.phorus.exception.core.ReservedErrorCodes
 import group.phorus.exception.config.MetricsRecorder
 import group.phorus.exception.config.SourceResolver
 import org.slf4j.LoggerFactory
@@ -33,6 +34,11 @@ private val PROBLEM_JSON = MediaType.parseMediaType("application/problem+json")
  *
  * **Example:** An authentication filter may throw `Unauthorized` or `Forbidden` from a WebFilter.
  * This handler catches those and returns structured JSON.
+ *
+ * Every response carries a non-null top-level `code`. Business exceptions emit either the
+ * caller's `code` argument or the reserved [ReservedErrorCodes] fallback for the HTTP
+ * status. Framework-level errors emit the reserved fallback for their status, falling back
+ * to [ReservedErrorCodes.INTERNAL_SERVER_ERROR] for unhandled cases.
  *
  * All caught exceptions are logged at **debug level** (configurable via `application.yml`)
  * and optionally recorded as metrics (see [MetricsRecorder]).
@@ -71,7 +77,7 @@ class WebfluxExceptionHandler(
                 ApiError.of(
                     httpStatus,
                     ex.message ?: httpStatus.reasonPhrase,
-                    code = ex.code,
+                    code = ex.effectiveCode,
                     source = sourceResolver.resolve(ex),
                     metadata = ex.metadata,
                 )
@@ -80,20 +86,35 @@ class WebfluxExceptionHandler(
             is ServerWebInputException -> {
                 logger.debug("Server web input error: {}", ex.reason)
                 metrics?.record(ex, HttpStatus.BAD_REQUEST)
-                ApiError.of(HttpStatus.BAD_REQUEST, ex.reason ?: "Failed to read HTTP message", source = sourceResolver.resolveDefault())
+                ApiError.of(
+                    HttpStatus.BAD_REQUEST,
+                    ex.reason ?: "Failed to read HTTP message",
+                    code = ReservedErrorCodes.BAD_REQUEST,
+                    source = sourceResolver.resolveDefault(),
+                )
             }
 
             is ResponseStatusException -> {
                 val httpStatus = HttpStatus.valueOf(ex.statusCode.value())
                 logger.debug("Response status exception: status={}, reason={}", httpStatus, ex.reason)
                 metrics?.record(ex, httpStatus)
-                ApiError.of(httpStatus, ex.reason ?: "Request failed", source = sourceResolver.resolveDefault())
+                ApiError.of(
+                    httpStatus,
+                    ex.reason ?: "Request failed",
+                    code = fallbackCodeFor(httpStatus),
+                    source = sourceResolver.resolveDefault(),
+                )
             }
 
             else -> {
                 logger.error("Unhandled WebFlux exception: ${ex.javaClass.simpleName}", ex)
                 metrics?.record(ex, HttpStatus.INTERNAL_SERVER_ERROR)
-                ApiError.of(HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error", source = sourceResolver.resolveDefault())
+                ApiError.of(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Internal server error",
+                    code = ReservedErrorCodes.INTERNAL_SERVER_ERROR,
+                    source = sourceResolver.resolveDefault(),
+                )
             }
         }
 
@@ -102,4 +123,9 @@ class WebfluxExceptionHandler(
         exchange.response.headers.contentType = PROBLEM_JSON
         return exchange.response.writeWith(Mono.just(dataBuffer))
     }
+
+    private fun fallbackCodeFor(httpStatus: HttpStatus): String =
+        ReservedErrorCodes.forStatusCode(httpStatus.value())
+            ?: if (httpStatus.is5xxServerError) ReservedErrorCodes.INTERNAL_SERVER_ERROR
+            else ReservedErrorCodes.BAD_REQUEST
 }

@@ -16,3 +16,10 @@ class RequestScenarioScope(
 class ResponseScenarioScope(
     var responseSpec: WebTestClient.ResponseSpec? = null,
 )
+
+/**
+ * Marker for tests that need to POST a raw JSON string instead of letting Jackson
+ * serialize a Kotlin object. Used for negative tests that need control over wire-level
+ * shape (`null` instead of missing field, raw numbers as strings, etc.).
+ */
+data class RawJsonPayload(val json: String)

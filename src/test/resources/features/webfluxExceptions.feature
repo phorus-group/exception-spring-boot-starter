@@ -8,7 +8,7 @@ Feature: Webflux exceptions are handled and a custom message is sent to the clie
     When the external service calls the "/v1/failFilter" endpoint
     Then the service returns HTTP 401
     And the response has status 401 and title "Unauthorized"
-    And the response does not contain code
+    And the response contains code "UNAUTHORIZED"
 
   Scenario: WebFilter exception with code includes code in response
     Given the caller has a normal object

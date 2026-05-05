@@ -1,5 +1,6 @@
 package group.phorus.exception.bdd.steps
 
+import group.phorus.exception.bdd.RawJsonPayload
 import group.phorus.exception.bdd.RequestScenarioScope
 import group.phorus.exception.bdd.ResponseScenarioScope
 import group.phorus.exception.bdd.TestObject
@@ -119,15 +120,25 @@ class BaseStepsDefinition(
         )
     }
 
+    @Given("the caller has a payload {string}")
+    fun `the caller has a payload`(payload: String) {
+        requestScenarioScope.request = RawJsonPayload(payload)
+    }
+
 
     @When("the external service calls the {string} endpoint")
     fun `when the external service calls the {string} endpoint`(endpoint: String) {
-        webTestClient.post()
-            .uri { it.path(endpoint).build() }
         val spec = webTestClient.post()
             .uri { it.path(endpoint).build() }
         val request = requestScenarioScope.request
-        val exchangeSpec = if (request != null) spec.bodyValue(request).exchange() else spec.exchange()
+        val exchangeSpec = when (request) {
+            null -> spec.exchange()
+            is RawJsonPayload -> spec
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .bodyValue(request.json)
+                .exchange()
+            else -> spec.bodyValue(request).exchange()
+        }
         responseScenarioScope.responseSpec = exchangeSpec
     }
 
@@ -158,6 +169,64 @@ class BaseStepsDefinition(
         responseScenarioScope.responseSpec!!
             .expectBody()
             .jsonPath("$.code").doesNotExist()
+    }
+
+    @Then("the validation error at index {int} contains code {string}")
+    fun `the validation error at index contains code`(index: Int, code: String) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].code").isEqualTo(code)
+    }
+
+    @Then("the validation error at index {int} does not contain code")
+    fun `the validation error at index does not contain code`(index: Int) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].code").doesNotExist()
+    }
+
+    @Then("the validation error at index {int} has metadata {string} with int value {int}")
+    fun `the validation error at index has metadata int`(index: Int, key: String, value: Int) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].metadata.$key").isEqualTo(value)
+    }
+
+    @Then("the validation error at index {int} has metadata {string} with string value {string}")
+    fun `the validation error at index has metadata string`(index: Int, key: String, value: String) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].metadata.$key").isEqualTo(value)
+    }
+
+    @Then("the validation error at index {int} has no metadata")
+    fun `the validation error at index has no metadata`(index: Int) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].metadata").doesNotExist()
+    }
+
+    @Then("the validation error at index {int} has metadata {string} with boolean value {string}")
+    fun `the validation error at index has metadata boolean`(index: Int, key: String, value: String) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].metadata.$key").isEqualTo(value.toBoolean())
+    }
+
+    @Then("the validation error at index {int} has metadata {string} as empty array")
+    fun `the validation error at index has metadata empty array`(index: Int, key: String) {
+        val pathExpr = "$.validationErrors[$index].metadata.$key"
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath(pathExpr).isArray
+            .jsonPath(pathExpr).isEmpty
+    }
+
+    @Then("the validation error at index {int} has no metadata key {string}")
+    fun `the validation error at index has no metadata key`(index: Int, key: String) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].metadata.$key").doesNotExist()
     }
 
     @Then("the response contains source {string}")
