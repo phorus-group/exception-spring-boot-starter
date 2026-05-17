@@ -269,3 +269,26 @@ Feature: Validation errors are handled and a custom message is sent to the clien
     Then the service returns HTTP 400
     And the validation error at index 0 contains code "MUST_BE_FALSE"
     And the validation error at index 0 has no metadata
+
+  # Spring 6.1+ raises HandlerMethodValidationException for constraint annotations
+  # directly on @RequestParam / @PathVariable / @RequestHeader / @CookieValue
+  # parameters. The handler maps it to the same structured response shape as a
+  # @RequestBody validation failure.
+
+  Scenario: @RequestParam @Min violation produces a structured validationErrors entry
+    When the external service calls the "/v1/testParamMin?limit=1" endpoint
+    Then the service returns HTTP 400
+    And the response contains code "VALIDATION_FAILED"
+    And the validation error at index 0 contains code "TOO_SMALL"
+    And the validation error at index 0 has metadata "value" with int value 5
+    And the validation error at index 0 has field "limit"
+
+  Scenario: @Valid on a DTO whose only constraint is group-scoped accepts a blank value at runtime
+    Given the caller has a payload "{ \"name\": \"\" }"
+    When the external service calls the "/v1/testValidOnGroupedDto" endpoint
+    Then the service returns HTTP 200
+
+  Scenario: @Validated with no group behaves like @Valid (default group accepts a blank value)
+    Given the caller has a payload "{ \"name\": \"\" }"
+    When the external service calls the "/v1/testValidatedNoGroupOnGroupedDto" endpoint
+    Then the service returns HTTP 200

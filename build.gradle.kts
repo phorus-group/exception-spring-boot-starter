@@ -31,7 +31,7 @@ configurations.all {
 
 group = "group.phorus"
 description = "Spring Boot WebFlux autoconfiguration for the Phorus exception handling library."
-version = "1.1.2"
+version = "1.1.3"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17

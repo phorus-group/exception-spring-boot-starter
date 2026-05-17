@@ -1,10 +1,6 @@
 package group.phorus.exception.bdd.steps
 
-import group.phorus.exception.bdd.RawJsonPayload
-import group.phorus.exception.bdd.RequestScenarioScope
-import group.phorus.exception.bdd.ResponseScenarioScope
-import group.phorus.exception.bdd.TestObject
-import group.phorus.exception.bdd.TestSubObject
+import group.phorus.exception.bdd.*
 import io.cucumber.datatable.DataTable
 import io.cucumber.java.en.Given
 import io.cucumber.java.en.Then
@@ -128,8 +124,15 @@ class BaseStepsDefinition(
 
     @When("the external service calls the {string} endpoint")
     fun `when the external service calls the {string} endpoint`(endpoint: String) {
+        val (path, query) = endpoint.split('?', limit = 2).let {
+            it[0] to it.getOrNull(1)
+        }
         val spec = webTestClient.post()
-            .uri { it.path(endpoint).build() }
+            .uri { builder ->
+                builder.path(path)
+                if (query != null) builder.query(query)
+                builder.build()
+            }
         val request = requestScenarioScope.request
         val exchangeSpec = when (request) {
             null -> spec.exchange()
@@ -176,6 +179,13 @@ class BaseStepsDefinition(
         responseScenarioScope.responseSpec!!
             .expectBody()
             .jsonPath("$.validationErrors[$index].code").isEqualTo(code)
+    }
+
+    @Then("the validation error at index {int} has field {string}")
+    fun `the validation error at index has field`(index: Int, field: String) {
+        responseScenarioScope.responseSpec!!
+            .expectBody()
+            .jsonPath("$.validationErrors[$index].field").isEqualTo(field)
     }
 
     @Then("the validation error at index {int} does not contain code")

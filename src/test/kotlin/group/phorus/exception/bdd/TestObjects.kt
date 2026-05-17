@@ -215,3 +215,204 @@ data class RangeMinOnlyDto(
     @field:Range(min = 5)
     val value: Int? = null,
 )
+
+/**
+ * Validation group markers used by [GroupsDto]. Mirror the
+ * production-side `Create` / `Update` groups so the openapi customizer
+ * has to scope `x-validations` and `required` per active group.
+ */
+interface CreateGroup
+interface UpdateGroup
+
+/**
+ * DTO with constraints scoped to validation groups. `@NotBlank` is
+ * active on the `Create` group only; `@Size` is active on both. Two
+ * controller endpoints reference this same DTO but with different
+ * `@Validated` groups, so the customizer must emit two distinct schema
+ * components (one per active group) with the correct `x-validations`
+ * and `required` for each.
+ */
+data class GroupsDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    @field:Size(max = 100, groups = [CreateGroup::class, UpdateGroup::class])
+    val name: String? = null,
+)
+
+/**
+ * DTO matching the production "no groups" pattern: the same DTO is
+ * referenced by two endpoints that use only `@Valid` (no `@Validated`),
+ * so all constraints apply on both operations. Used to guard against
+ * the group-aware customizer mis-cloning ungrouped DTOs or stripping
+ * their constraints.
+ */
+data class UngroupedDto(
+    @field:NotBlank
+    @field:Size(max = 100)
+    val name: String? = null,
+)
+
+/**
+ * Outer DTO with a cascading nested field. Both the outer field and the
+ * nested DTO carry constraints scoped to validation groups. JSR 380 §5.4.5
+ * dictates the outer group propagates through `@Valid` cascading, so the
+ * customizer must clone the inner DTO per active group too, not only the
+ * outer one.
+ */
+data class OuterGroupsDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    @field:Size(max = 100, groups = [CreateGroup::class, UpdateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val inner: InnerGroupsDto? = null,
+)
+
+data class InnerGroupsDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val email: String? = null,
+
+    @field:NotBlank(groups = [UpdateGroup::class])
+    val displayName: String? = null,
+)
+
+/**
+ * Three-level DTO chain used by the multi-level cascade tests. Each level carries a
+ * group-scoped constraint and a `@field:Valid` cascade into the next; the customizer
+ * must clone all three components per active group.
+ */
+data class Level1Dto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val level2: Level2Dto? = null,
+)
+
+data class Level2Dto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val level3: Level3Dto? = null,
+)
+
+data class Level3Dto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+)
+
+/**
+ * Outer DTO whose nested DTO carries no group-scoped constraints. The outer is cloned
+ * per group, but its `plain` property must keep the original `$ref` since the inner
+ * has nothing to filter or scope.
+ */
+data class OuterWithPlainInnerDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val plain: PlainInnerDto? = null,
+)
+
+data class PlainInnerDto(
+    @field:NotBlank
+    val value: String? = null,
+)
+
+/**
+ * DTO whose only constraint is group-scoped and that is consumed by `@Validated(Group)`
+ * endpoints only, never by `@Valid`. Used to verify the original component is pruned from
+ * `components.schemas` when no consumer references it directly.
+ */
+data class OnlyGroupsOrphanDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val value: String? = null,
+)
+
+/**
+ * DTO with one field per Jakarta + Hibernate annotation that produces a JSON Schema validator.
+ * Every field's constraint is scoped to `CreateGroup`. Two endpoints reference this DTO, one
+ * pinned to `Create` and one using `@Valid`, so the per-group clone and the default-view
+ * original can be asserted side by side for every annotation family.
+ */
+data class GroupedValidatorsDto(
+    @field:NotEmpty(groups = [CreateGroup::class])
+    val notEmptyString: String? = null,
+
+    @field:NotEmpty(groups = [CreateGroup::class])
+    val notEmptyList: List<String>? = null,
+
+    @field:Size(min = 2, max = 50, groups = [CreateGroup::class])
+    val sizeString: String? = null,
+
+    @field:Size(min = 2, max = 50, groups = [CreateGroup::class])
+    val sizeList: List<String>? = null,
+
+    @field:org.hibernate.validator.constraints.Length(min = 2, max = 50, groups = [CreateGroup::class])
+    val lengthString: String? = null,
+
+    @field:jakarta.validation.constraints.Min(value = 5, groups = [CreateGroup::class])
+    val minInt: Int? = null,
+
+    @field:jakarta.validation.constraints.Max(value = 50, groups = [CreateGroup::class])
+    val maxInt: Int? = null,
+
+    @field:jakarta.validation.constraints.DecimalMin(value = "5.5", groups = [CreateGroup::class])
+    val decimalMin: java.math.BigDecimal? = null,
+
+    @field:jakarta.validation.constraints.DecimalMax(value = "50.5", groups = [CreateGroup::class])
+    val decimalMax: java.math.BigDecimal? = null,
+
+    @field:org.hibernate.validator.constraints.Range(min = 5, max = 50, groups = [CreateGroup::class])
+    val rangeInt: Int? = null,
+
+    @field:jakarta.validation.constraints.Positive(groups = [CreateGroup::class])
+    val positiveInt: Int? = null,
+
+    @field:jakarta.validation.constraints.PositiveOrZero(groups = [CreateGroup::class])
+    val positiveOrZeroInt: Int? = null,
+
+    @field:jakarta.validation.constraints.Negative(groups = [CreateGroup::class])
+    val negativeInt: Int? = null,
+
+    @field:jakarta.validation.constraints.NegativeOrZero(groups = [CreateGroup::class])
+    val negativeOrZeroInt: Int? = null,
+
+    @field:jakarta.validation.constraints.Pattern(regexp = "[A-Z]+", groups = [CreateGroup::class])
+    val patternString: String? = null,
+
+    @field:jakarta.validation.constraints.Email(groups = [CreateGroup::class])
+    val emailString: String? = null,
+)
+
+/**
+ * DTO with a field carrying BOTH an ungrouped constraint and a group-scoped one. The
+ * ungrouped entry (default group) must survive every per-group filter; the group-scoped
+ * one is kept only when its group is active.
+ */
+data class MixedConstraintsDto(
+    @field:NotBlank
+    @field:Pattern(regexp = "[A-Z]+", groups = [CreateGroup::class])
+    val name: String? = null,
+)
+
+/**
+ * DTO whose cascading `@Valid` is on a List element. Per JSR 380 TYPE_USE container
+ * element constraints, the outer group propagates into each element's cascade. The
+ * customizer must walk `items.$ref` (not just `$ref` on the property itself) to find
+ * the inner component and clone it.
+ */
+data class CollectionGroupsDto(
+    @field:Valid
+    val items: List<InnerGroupsDto>? = null,
+)
+
+/**
+ * DTO used only as a response body, never as a request body. The orphan-pruning walk
+ * must reach it through `operation.responses[*].content[*].schema` so the response's
+ * `$ref` keeps resolving to a real component in `components.schemas`.
+ */
+data class ResponseOnlyDto(
+    @field:NotBlank
+    val name: String? = null,
+)

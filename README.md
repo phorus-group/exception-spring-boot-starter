@@ -24,6 +24,11 @@ to get both.
 ## Table of contents
 
 - [Exception handling in Spring WebFlux](#exception-handling-in-spring-webflux)
+- [How exception handling works](#how-exception-handling-works)
+  - [Controller layer](#controller-layer)
+  - [WebFilter layer](#webfilter-layer)
+  - [Source field auto-population](#source-field-auto-population)
+  - [Metrics integration](#metrics-integration)
 - [Features](#features)
 - [Getting started](#getting-started)
   - [Installation](#installation)
@@ -39,7 +44,10 @@ to get both.
 - [Logging](#logging)
 - [Metrics](#metrics)
 - [OpenAPI integration](#openapi-integration)
+  - [How the OpenAPI integration works](#how-the-openapi-integration-works)
+  - [Disabling the OpenAPI integration](#disabling-the-openapi-integration)
   - [`x-validations` OpenAPI extension](#x-validations-openapi-extension)
+  - [Validation groups](#validation-groups)
   - [Generating client validation from `x-validations`](#generating-client-validation-from-x-validations)
 - [Building and contributing](#building-and-contributing)
 
@@ -77,12 +85,71 @@ flowchart TD
 
 Everything is autoconfigured via Spring Boot's `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
 
+## How exception handling works
+
+When a request enters the service, exceptions can be thrown at two layers, inside a WebFilter (auth,
+rate-limit, etc.) and inside a controller method. The library registers one handler per layer, and
+both produce the same `ApiError` JSON shape.
+
+### Controller layer
+
+`RestExceptionHandler` is a `@RestControllerAdvice` that catches every exception thrown inside a
+controller and converts it to a structured response. Spring resolves the most specific
+`@ExceptionHandler` first, so the table below reflects what each exception type lands on, not the
+order of evaluation.
+
+| Exception | Source | Response |
+|---|---|---|
+| `BaseException` (and any subclass) | `throw NotFound("...")`, `throw BadRequest(...)`, custom subclasses | HTTP status from the exception, `code` from the exception or the reserved fallback for the status |
+| `WebExchangeBindException` | `@Valid` / `@Validated` failure on a `@RequestBody`, `@RequestParam`, `@PathVariable`, `@RequestHeader`, or `@CookieValue` in WebFlux | 400, `code = VALIDATION_FAILED`, per-field `validationErrors[]` with codes derived from the failing Jakarta constraint |
+| `ConstraintViolationException` | Method-level validation when the controller class is annotated `@Validated` | 400, same `validationErrors[]` shape |
+| `MethodArgumentTypeMismatchException` | `@PathVariable id: UUID` where the client sent a non-UUID, etc. | 400, `code = BAD_REQUEST` |
+| `ServerWebInputException` | Malformed JSON body, missing required parts, decoding errors | 400, `code = BAD_REQUEST` |
+| `DataIntegrityViolationException` | JPA unique constraint, foreign key violation, etc. | 409, `code = CONFLICT` |
+| `ResponseStatusException` | Anything Spring-internal that already carries an HTTP status | The carried status, reason as `detail` |
+| `TimeoutException` | Reactor timeout signals | 504, `code = GATEWAY_TIMEOUT` |
+| Any other `Exception` | Last-resort safety net | 500, `code = INTERNAL_SERVER_ERROR`, generic message, logged at error level with the stack trace |
+
+Each handler builds the response via `ApiError.of(...)` and returns it with content type
+`application/problem+json`. See [Response format](#response-format) for the full body contract.
+
+`WebExchangeBindException` and `ConstraintViolationException` are the two paths that produce
+per-field `validationErrors[]`. Each entry carries the field path, the rejected value, the
+reserved code derived from the failing Jakarta constraint, and a `metadata` object with the
+constraint's public attributes (`min`, `max`, `regexp`, etc.). See
+[Auto-derived per-field codes](#auto-derived-per-field-codes) for the constraint-to-code table.
+
+### WebFilter layer
+
+`WebfluxExceptionHandler` is registered with `@Order(-2)` so it sits above Spring's default error
+`WebExceptionHandler` chain. It catches any exception thrown before the request reaches a
+controller, including `BaseException` thrown from an auth filter, a rate-limit filter, or any
+custom WebFilter, and returns the same `ApiError` JSON.
+
+Without this layer, WebFilter exceptions produce generic framework responses with no structured
+body. With it, the client sees the same response shape regardless of which layer the exception
+came from. See [WebFilter exceptions](#webfilter-exceptions) for examples.
+
+### Source field auto-population
+
+When `spring.application.name` is set, every response carries `source: "<application-name>"` so
+gateways and aggregating services know which microservice produced the error. Exceptions that pass
+`source` explicitly override the default. See [Auto-populated source](#auto-populated-source) for
+the toggle and override semantics.
+
+### Metrics integration
+
+When Spring Boot Actuator is on the classpath, both handlers record exception counters via
+[metrics-commons](https://github.com/phorus-group/metrics-commons). See [Metrics](#metrics) for
+the tag set and disabling.
+
 ## Features
 
 - **Exception hierarchy**: throw `BadRequest("message")`, `NotFound("message")`, etc. and the correct HTTP status is set automatically. Extensible with custom subclasses.
 - **Always present `code`**: every error response carries a non-null top-level `code`. When the exception sets one explicitly it is used as-is, otherwise the reserved fallback for the HTTP status (`BAD_REQUEST`, `NOT_FOUND`, etc.) is emitted.
 - **Auto-derived per-field validation codes**: every `validationErrors[]` entry carries a `code` derived from the failing Jakarta constraint (`BLANK` for `@NotBlank`, `TOO_SHORT` or `TOO_LONG` for `@Size`, `INVALID_FORMAT` for `@Pattern`, etc.) and a `metadata` object with the constraint's public attributes (`min`, `max`, `regexp`).
 - **OpenAPI `x-validations` extension**: every property annotated with Jakarta constraints is published in `/v3/api-docs` with an `x-validations` array describing the rule and reserved code for each constraint, so SDK generators and API consumers can read the per-field validation contract at generation time. Useful for generating FE schema validators (Zod, Yup, Valibot, Joi) that catch invalid input on the client without round-tripping to the BE, and for using the reserved codes as i18n keys to render translated, client-facing error messages. See [Generating client validation from `x-validations`](#generating-client-validation-from-x-validations).
+- **OpenAPI group-scoped schemas**: when a controller pins its `@RequestBody` to a Jakarta validation group via `@Validated(Group::class)`, the operation's body schema becomes a group-specific clone whose `x-validations` and `required` cover only that group's constraints. Operations with no pinned group (`@Valid`, or `@Validated` with no value, both run the `Default` group) keep the original component, filtered to its default-group view.
 - **Two-layer handling**: `RestExceptionHandler` catches controller exceptions, `WebfluxExceptionHandler` catches filter and framework exceptions
 - **Bean validation**: supports `@Valid` on request bodies, collections, and Kotlin `suspend` functions with correct parameter names
 - **Database conflict detection**: `DataIntegrityViolationException` is caught and returned as `409 Conflict`
@@ -544,6 +611,325 @@ registers `ApiError` and `ValidationError` schemas in the OpenAPI components and
 `default` error response to every endpoint. This covers all error status codes with a single
 entry referencing the `ApiError` schema.
 
+### How the OpenAPI integration works
+
+The library plugs five customizer beans into springdoc pipeline. Together they produce a
+`/v3/api-docs` document that carries the `ApiError` schema, a default error response on every
+operation, per-field validation rules with reserved codes as an `x-validations` extension, and
+per-group schema clones when an operation pins one or more Jakarta validation groups.
+
+springdoc exposes a handful of extension points that let third-party libraries hook into spec
+generation. They are plain Java interfaces a library implements as Spring beans, and springdoc
+calls them at well-defined moments while building the document. The relevant ones here are
+`PropertyCustomizer` (one call per DTO property), `ParameterCustomizer` (one call per request
+parameter), `OperationCustomizer` (one call per operation, with the `HandlerMethod`), and
+`OpenApiCustomizer` (one call on the fully built document). The library registers one bean per
+extension point plus a second `OpenApiCustomizer`, for five total.
+
+The pipeline runs in two phases.
+
+#### Phase 1: per-element customizers
+
+springdoc walks each controller method and resolves its request body DTOs, response DTOs, and
+parameters. The library plugs into two extension points during this walk.
+
+A `PropertyCustomizer` runs once per property of every body DTO component schema. It reads the
+Jakarta and Hibernate constraint annotations on the backing field and does two things:
+
+- Fills standard JSON Schema validator keys (`minLength`, `minimum`, `exclusiveMinimum`, ...) for
+  constraint annotations springdoc does not translate natively. springdoc handles `@NotNull`,
+  `@NotBlank`, `@Size`, `@Min`, `@Max`, `@Pattern`, `@Email`, `@DecimalMin`, `@DecimalMax` itself.
+  The library fills the gap for Hibernate's `@Length`, `@Range`, and for Jakarta's `@Positive`,
+  `@PositiveOrZero`, `@Negative`, `@NegativeOrZero`.
+- Builds the `x-validations` array (one entry per constraint, with `rule`, `code`, and an internal
+  `groups` list) and attaches it to the property schema.
+
+A `ParameterCustomizer` runs once per path / query / header / cookie parameter. springdoc routes
+those through a different extension point that does not invoke `PropertyCustomizer`, so the
+library registers a second bean that reads the parameter's annotations and applies the same logic
+to the parameter's schema. Standard JSON Schema validators on parameters are still emitted by
+springdoc natively next to the `x-validations` array.
+
+An `OperationCustomizer` runs once per operation, with both the `Operation` and the underlying
+`HandlerMethod`. It inspects the `@RequestBody` parameter (and falls back to the controller
+method itself) for an `@Validated(Group::class)` annotation, and when one is found, records an
+in-memory `(Operation, groups)` binding for phase 2. It does not mutate the spec at this point
+because springdoc reuses the same `Schema` instance across operations that take the same DTO,
+and mutating it would leak the rewrite into sibling operations.
+
+#### Phase 2: whole-document customizers
+
+After springdoc finishes building the document, two `OpenApiCustomizer` beans run.
+
+The first registers `ApiError` and `ValidationError` as reusable component schemas (via
+`ModelConverters.read(...)`, the same machinery springdoc uses for body DTOs) and adds a
+`default` error response with content type `application/problem+json` to every operation that
+does not already declare one.
+
+The second runs four passes in order:
+
+1. Per-group cloning. Consumes the bindings collected by the per-operation customizer. For each
+   binding it deep-clones the referenced component via swagger's Jackson mapper (which understands
+   the polymorphic `Schema` hierarchy), filters the clone's `x-validations` entries to those whose
+   `groups` is empty (default group) or intersects with the active group set, and recomputes the
+   clone's `required` array from the kept presence rules (`notBlank`, `required`, `minLength`,
+   `minItems`). It walks every property on the clone whose schema is a `$ref` to another
+   component; if the inner carries group-scoped constraints directly or transitively, it
+   recursively clones it under the same active group set and rewrites the property's `$ref` to
+   point at the inner clone. This matches JSR 380 §5.4.5 group propagation through `@Valid`
+   cascading. The clone gets a derived name (`OriginalName_GroupName1_GroupName2`, with groups
+   sorted alphabetically for determinism). Finally, the operation's request body schema is
+   replaced with a fresh `$ref` holder pointing at the clone.
+2. Default-group view of the originals. Operations that pin no group (`@Valid`, or `@Validated`
+   with no value, or no validation annotation at all) run under the `Default` group at runtime,
+   and constraints with an explicit `groups()` attribute are not part of `Default`.
+   The original component must match what the BE actually enforces, so every non-derived
+   component is filtered to keep only entries whose `groups()` is empty. springdoc already
+   respects `groups()` when deriving the `required` array on the original; this pass does the
+   equivalent for `x-validations`.
+3. Orphan pruning. After cloning and filtering, every component in `components.schemas` that no
+   operation parameter, request body, response, or other component transitively references is
+   dropped. The walk starts from operation roots and follows `$ref` through every node that can
+   hold one (`properties`, `items`, `allOf`, `oneOf`, `anyOf`, `additionalProperties`).
+4. Strip internal keys. Walks every component schema's properties and every operation's parameter
+   schemas one final time and strips the internal `groups` key from every `x-validations` entry,
+   so consumers see only the public `{ rule, code }` shape.
+
+#### Pipeline at a glance
+
+```mermaid
+flowchart TD
+    A[springdoc starts the spec build] --> B[Per body DTO property]
+    A --> C[Per request parameter]
+    A --> D[Per operation]
+    B --> E["PropertyCustomizer:<br/>fills JSON Schema keys + x-validations<br/>on body fields"]
+    C --> F["ParameterCustomizer:<br/>fills JSON Schema keys + x-validations<br/>on path / query / header / cookie params"]
+    D --> G["OperationCustomizer:<br/>records (operation, groups) bindings"]
+    E --> H[Whole document built]
+    F --> H
+    G --> H
+    H --> I["OpenApiCustomizer:<br/>registers ApiError + ValidationError schemas,<br/>adds default error response to every operation"]
+    H --> J["OpenApiCustomizer:<br/>clones per group,<br/>filters originals to default view,<br/>prunes orphans,<br/>strips internal keys"]
+    I --> K["/v3/api-docs served"]
+    J --> K
+```
+
+#### A worked example
+
+Two endpoints sharing the same DTO, one pinned to `Create` and one to `Update`. The DTO mixes
+every group placement: a field scoped to `Create` only, a field with no `groups` attribute, a
+field scoped to both `Create` and `Update`, and a field scoped to `Update` only. Plus a
+cascading nested DTO with its own group-scoped constraint.
+
+```kotlin
+@PostMapping("/users")
+fun create(
+    @RequestBody @Validated(Create::class) body: UserDto,
+    @RequestParam @PositiveOrZero offset: Int,
+): String = "ok"
+
+@PatchMapping("/users/{id}")
+fun update(
+    @PathVariable id: UUID,
+    @RequestBody @Validated(Update::class) body: UserDto,
+): String = "ok"
+
+data class UserDto(
+    @field:NotBlank(groups = [Create::class])
+    val name: String?,
+
+    @field:Email
+    val contactEmail: String?,
+
+    @field:NotBlank(groups = [Create::class, Update::class])
+    val username: String?,
+
+    @field:Size(max = 500, groups = [Update::class])
+    val biography: String?,
+
+    @field:Valid
+    val address: AddressDto?,
+)
+
+data class AddressDto(
+    @field:NotBlank(groups = [Create::class])
+    val street: String?,
+)
+```
+
+the served `/v3/api-docs` contains:
+
+```yaml
+paths:
+  /users:
+    post:
+      operationId: create
+      parameters:
+        - name: offset
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int32
+            minimum: 0                          # JSON Schema validator (from @PositiveOrZero)
+            x-validations:                      # reserved-code mapping (from @PositiveOrZero)
+              - rule: minimum
+                code: MUST_BE_POSITIVE_OR_ZERO
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserDto_Create'   # rewritten by the group customizer
+      responses:
+        '200': { description: OK }
+        default:                                # added by the error customizer
+          description: Error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /users/{id}:
+    patch:
+      operationId: update
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserDto_Update'   # rewritten by the group customizer
+      responses:
+        '200': { description: OK }
+        default:
+          description: Error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+components:
+  schemas:
+    ApiError: ...                               # registered by the error customizer
+    ValidationError: ...                        # registered by the error customizer
+
+    # UserDto and AddressDto have been pruned: every operation in this example pins a
+    # validation group, so the rewrite step swaps the body $refs to the per-group clones
+    # below. The originals end up referenced by zero operation roots and the orphan-pruning
+    # step drops them. Add a third endpoint that pins no group (either `@Valid` or
+    # `@Validated` with no value, both run the `Default` group) to keep them. The originals
+    # would then be filtered to their default-group view (in this DTO, only contactEmail's
+    # @Email entry has no groups attribute and survives; the other fields' x-validations
+    # would be empty and `required` would not contain name or username).
+
+    UserDto_Create:                             # per-group clone, body of POST /users
+      type: object
+      required: [name, username]                # derived from the kept notBlank entries
+      properties:
+        name:
+          type: string
+          x-validations:
+            - rule: notBlank                    # kept: Create matches the field's groups = [Create]
+              code: BLANK
+        contactEmail:
+          type: string
+          format: email
+          x-validations:
+            - rule: format                      # kept: no `groups` attribute means every active group keeps it
+              code: INVALID_EMAIL
+        username:
+          type: string
+          x-validations:
+            - rule: notBlank                    # kept: Create matches one of the field's groups = [Create, Update]
+              code: BLANK
+        biography:
+          type: string                          # the only x-validations entry was Update-scoped and got dropped;
+                                                # the maxLength JSON Schema validator is dropped with it, so the
+                                                # Create clone matches what the BE enforces under Create (no bound)
+        address:
+          $ref: '#/components/schemas/AddressDto_Create'   # nested cascade clone
+
+    AddressDto_Create:                          # per-group clone, reached from UserDto_Create.address
+      type: object
+      required: [street]
+      properties:
+        street:
+          type: string
+          x-validations:
+            - rule: notBlank                    # kept: street has groups = [Create]
+              code: BLANK
+
+    UserDto_Update:                             # per-group clone, body of PATCH /users/{id}
+      type: object
+      required: [username]                      # only username has a presence rule active for Update
+      properties:
+        name:
+          type: string                          # the notBlank entry was Create-only and got dropped;
+                                                # name carries no x-validations under Update
+        contactEmail:
+          type: string
+          format: email
+          x-validations:
+            - rule: format                      # kept: no `groups` attribute
+              code: INVALID_EMAIL
+        username:
+          type: string
+          x-validations:
+            - rule: notBlank                    # kept: Update matches one of the field's groups = [Create, Update]
+              code: BLANK
+        biography:
+          type: string
+          maxLength: 500
+          x-validations:
+            - rule: maxLength                   # kept: Update matches the field's groups = [Update]
+              code: TOO_LONG
+        address:
+          $ref: '#/components/schemas/AddressDto_Update'   # nested cascade clone
+
+    AddressDto_Update:                          # per-group clone, reached from UserDto_Update.address
+      type: object                              # no required field; street's only entry was Create-only and got dropped
+      properties:
+        street:
+          type: string                          # carries no x-validations under Update
+```
+
+An operation that pins `@Validated(Create::class)` references `UserDto_Create`, one pinned to
+`Update` references `UserDto_Update`, and one that pins no group (either `@Valid` or
+`@Validated` with no value) would reference `UserDto` directly. The same logic applied to the
+nested `address` field produces the matching `AddressDto_Create` / `AddressDto_Update` pair,
+and would produce a default-group view of `AddressDto` if any consumer pinned no group.
+
+For the contract details emitted at each step, see the subsections below.
+
+### Disabling the OpenAPI integration
+
+Two YAML flags control which OpenAPI customizers the library registers. Both default to `true`,
+so the integration is on by default whenever springdoc is on the classpath. Disable them when a
+consumer publishes its own `ApiError` schema or its own validation extensions and does not want
+this library to participate.
+
+```yaml
+group:
+  phorus:
+    exception:
+      openapi:
+        enabled: true              # default: true. Set to false to skip the whole OpenAPI autoconfig.
+        x-validations:
+          enabled: true            # default: true. Set to false to skip x-validations and group cloning.
+```
+
+| Flag | Effect when `false` |
+|---|---|
+| `group.phorus.exception.openapi.enabled` | The entire `OpenApiAutoConfiguration` class is skipped. No `ApiError` / `ValidationError` schemas, no `default` error response on operations, no `x-validations`, no per-group clones. springdoc serves whatever it would have served on its own. |
+| `group.phorus.exception.openapi.x-validations.enabled` | The `ApiError` / `ValidationError` schemas and the default `application/problem+json` response stay. `x-validations` on body fields and parameters is not emitted, and `@Validated(Group::class)` no longer produces per-group schema clones. Useful when the runtime error contract should be published but SDK generators should not see the reserved-code mapping. |
+
+The flags compose: when `openapi.enabled` is `false`, the inner flag has no effect because
+the whole class is skipped. Both flags are `matchIfMissing = true` so omitting them entirely
+keeps the library on.
+
 ### `x-validations` OpenAPI extension
 
 The library registers a `PropertyCustomizer` bean that publishes every Jakarta constraint
@@ -611,6 +997,176 @@ on the classpath, which matches the existing OpenAPI integration.
 Annotations are emitted in source declaration order. When two annotations would produce
 the same `rule` (for example writing `@Min(0)` together with `@PositiveOrZero`), only the
 first declared one is kept.
+
+Path, query, header, and cookie parameters receive the same `x-validations` array on their
+schema via a `ParameterCustomizer`. springdoc emits its native JSON Schema validators
+(`minLength`, `pattern`, `minimum`, ...) on the parameter schema as usual; the library adds
+the reserved-code mapping alongside.
+
+```kotlin
+@PostMapping("/items")
+fun list(
+    @RequestParam @Min(5) limit: Int,
+    @RequestHeader("X-Trace") @NotBlank traceId: String,
+): String = ...
+```
+
+```yaml
+paths:
+  /items:
+    post:
+      parameters:
+        - name: limit
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int32
+            minimum: 5
+            x-validations:
+              - rule: minimum
+                code: TOO_SMALL
+        - name: X-Trace
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            x-validations:
+              - rule: notBlank
+                code: BLANK
+```
+
+### Validation groups
+
+When an operation pins one or more Jakarta validation groups via `@Validated(Group::class)`,
+its body schema becomes a group-specific clone of the DTO component. The pin is read from the
+`@RequestBody` parameter first and falls back to a method-level `@Validated(Group::class)`,
+matching Spring's runtime behavior. The clone's `x-validations` array drops constraint entries
+whose `groups()` attribute does not include any of the active groups, and the clone's
+`required` array is derived from the kept presence-rule entries (`notBlank`, `required`,
+`minLength`, `minItems`).
+
+```kotlin
+data class OrganizationRequest(
+    @field:NotBlank(groups = [Create::class, Replace::class])
+    @field:Size(max = 100, groups = [Create::class, Update::class, Replace::class])
+    val name: String?,
+)
+
+@RestController
+class OrganizationController {
+
+    @PostMapping("/organization")
+    fun create(
+        @RequestBody @Validated(Create::class) body: OrganizationRequest,
+    ): String = ...
+
+    @PatchMapping("/organization/{id}")
+    fun update(
+        @PathVariable id: UUID,
+        @RequestBody @Validated(Update::class) body: OrganizationRequest,
+    ): String = ...
+}
+```
+
+The generated spec carries two derived components alongside the original. The `create`
+operation references `OrganizationRequest_Create`, the `update` operation references
+`OrganizationRequest_Update`.
+
+```yaml
+OrganizationRequest_Create:
+  type: object
+  required:
+    - name
+  properties:
+    name:
+      type: string
+      maxLength: 100
+      x-validations:
+        - rule: notBlank
+          code: BLANK
+        - rule: maxLength
+          code: TOO_LONG
+
+OrganizationRequest_Update:
+  type: object
+  properties:
+    name:
+      type: string
+      maxLength: 100
+      x-validations:
+        - rule: maxLength
+          code: TOO_LONG
+```
+
+Derived component names follow the `OriginalName_GroupName1_GroupName2` shape with group
+names sorted alphabetically, so the same group set always produces the same name and the
+same operation references the same clone across builds.
+
+Operations that pin no group reference the original component, which is filtered to its
+**default-group view**. Both `@Valid` and `@Validated` with no value (e.g. `@Validated body`)
+fall in this bucket: at runtime Spring runs them under the `Default` group, and a constraint
+with an explicit `groups()` attribute is not part of `Default`, so the served original keeps
+only `x-validations` entries whose `groups()` is empty. The `required` array on the original
+follows the same rule (springdoc already filters it by group). The end effect: a consumer
+that pins no group reads the same set of constraints the BE actually enforces at runtime.
+
+When every operation that uses a DTO pins a group, the original ends up referenced by no
+operation. The orphan-pruning pass then drops it from `components.schemas`, leaving only
+the per-group clones. A DTO that is referenced from at least one no-group consumer or from
+a response type stays in place, filtered to its default-group view.
+
+JSON Schema validators next to the property (`minLength`, `maximum`, `pattern`, `format`,
+etc.) are filtered the same way as `x-validations`. The default-view of the original drops
+any validator whose source annotation carried a non-empty `groups()` attribute (matching
+springdoc own behavior for natively-handled annotations like `@Size`, `@Pattern`, `@Min`),
+and per-group clones re-add the validator from the kept `x-validations` entries when the
+active group makes the constraint apply. So `@Size(max = 100, groups = [Create::class])`
+on a property produces `maxLength: 100` on the `Create` clone but no `maxLength` on the
+default-view original or the `Update` clone.
+
+Nested cascades follow `properties.$ref`, `items.$ref` (for `List<@Valid Inner>` and other
+collection containers), `additionalProperties.$ref` (for `Map<String, @Valid Inner>`), and
+`allOf` / `oneOf` / `anyOf` (for polymorphic DTOs that springdoc emits via `@JsonSubTypes`
+or `@Schema(oneOf = ...)`). Per-group inner clones are produced wherever the active group
+makes a difference at any of those positions.
+
+Nested DTOs reached through `@field:Valid` cascade into per-group clones too. Per JSR 380
+§5.4.5 the active group propagates into the cascade, so when an outer endpoint pins `Create`
+the customizer recursively clones every nested component whose own properties carry
+group-scoped `x-validations` entries, rewrites the parent clone's `$ref` to point at the
+inner clone, and filters each inner clone the same way it filters the outer. Nested
+components without any group-scoped constraint stay shared across consumers, the parent
+clone's `$ref` still points at the original.
+
+```kotlin
+data class OuterDto(
+    @field:NotBlank(groups = [Create::class])
+    val name: String?,
+    @field:Valid
+    val inner: InnerDto?,
+)
+
+data class InnerDto(
+    @field:NotBlank(groups = [Create::class])
+    val email: String?,
+    @field:NotBlank(groups = [Update::class])
+    val displayName: String?,
+)
+```
+
+For a `create` endpoint pinned to `Create`, the spec carries both `OuterDto_Create` and
+`InnerDto_Create`. The Create clone's `email` is in `required` and its `displayName` is not,
+because `displayName`'s notBlank is scoped to `Update` and gets dropped from the Create
+clone's `x-validations`. The Update endpoint produces the mirrored `OuterDto_Update` and
+`InnerDto_Update`.
+
+Parameter constraints carrying `groups()` are emitted unconditionally on the parameter
+schema, with no per-group cloning. Spring's `@RequestBody` resolver is the only path that
+honors groups at the parameter level at runtime; path / query / header / cookie validation
+fires against the constraint annotations directly without consulting groups, so per-group
+parameter schemas would not match runtime behavior.
 
 ### Generating client validation from `x-validations`
 
