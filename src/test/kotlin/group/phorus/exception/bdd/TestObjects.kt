@@ -386,6 +386,31 @@ data class GroupedValidatorsDto(
 )
 
 /**
+ * DTO with rich `@Schema`-driven metadata on group-scoped fields. The clone walker must
+ * preserve `format` (uuid / int32), `description`, `title`, `example`, `enum`, and
+ * `default` so the served per-group component matches the source DTO's contract.
+ */
+enum class StatusEnum { ACTIVE, INACTIVE }
+
+data class GroupedRichDto(
+    @field:jakarta.validation.constraints.NotNull(groups = [CreateGroup::class])
+    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Unique user identifier", title = "User id")
+    val id: java.util.UUID? = null,
+
+    @field:jakarta.validation.constraints.NotBlank(groups = [CreateGroup::class])
+    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Display name", example = "Alice", title = "Name")
+    val name: String? = null,
+
+    @field:jakarta.validation.constraints.Min(value = 5, groups = [CreateGroup::class])
+    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Number of items")
+    val count: Int? = null,
+
+    @field:jakarta.validation.constraints.NotNull(groups = [CreateGroup::class])
+    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Current status", defaultValue = "ACTIVE")
+    val status: StatusEnum? = null,
+)
+
+/**
  * DTO with a field carrying BOTH an ungrouped constraint and a group-scoped one. The
  * ungrouped entry (default group) must survive every per-group filter; the group-scoped
  * one is kept only when its group is active.

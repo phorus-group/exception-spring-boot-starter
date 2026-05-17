@@ -301,4 +301,12 @@ class TestController {
     fun testMultiMediaCreate(
         @RequestBody @Validated(CreateGroup::class) body: GroupsDto,
     ): String = "OK"
+
+    @PostMapping("/v1/testGroupedRichCreate")
+    fun testGroupedRichCreate(
+        @RequestBody @Validated(CreateGroup::class) body: GroupedRichDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testGroupedRichValid")
+    fun testGroupedRichValid(@RequestBody @Valid body: GroupedRichDto): String = "OK"
 }

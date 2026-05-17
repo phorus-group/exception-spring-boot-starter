@@ -689,12 +689,16 @@ The second runs four passes in order:
    respects `groups()` when deriving the `required` array on the original; this pass does the
    equivalent for `x-validations`.
 3. Orphan pruning. After cloning and filtering, every component in `components.schemas` that no
-   operation parameter, request body, response, or other component transitively references is
-   dropped. The walk starts from operation roots and follows `$ref` through every node that can
-   hold one (`properties`, `items`, `allOf`, `oneOf`, `anyOf`, `additionalProperties`).
-4. Strip internal keys. Walks every component schema's properties and every operation's parameter
-   schemas one final time and strips the internal `groups` key from every `x-validations` entry,
-   so consumers see only the public `{ rule, code }` shape.
+   other place in the document points at is dropped. To decide which components are still
+   pointed at, the customizer walks the whole document tree (every operation and its
+   parameters / request bodies / responses / callbacks, path-level parameters, response
+   headers and links, request body and response content with their encoding headers,
+   root-level webhooks, every reusable component map) and follows `$ref` through every
+   sub-schema keyword the OpenAPI 3.0 and JSON Schema 2020-12 specs define, plus
+   `discriminator.mapping` targets. Anything not found in that walk is removed.
+4. Strip internal keys. Walks every schema in the document the same way as step 3 and
+   strips the internal `groups` and `value` keys from every `x-validations` entry, so
+   consumers see only the public `{ rule, code }` shape.
 
 #### Pipeline at a glance
 
@@ -1132,11 +1136,13 @@ active group makes the constraint apply. So `@Size(max = 100, groups = [Create::
 on a property produces `maxLength: 100` on the `Create` clone but no `maxLength` on the
 default-view original or the `Update` clone.
 
-Nested cascades follow `properties.$ref`, `items.$ref` (for `List<@Valid Inner>` and other
+Nested cascades follow every sub-schema position the OpenAPI 3.0 and JSON Schema 2020-12
+specs define, including `properties.$ref`, `items.$ref` (for `List<@Valid Inner>` and other
 collection containers), `additionalProperties.$ref` (for `Map<String, @Valid Inner>`), and
 `allOf` / `oneOf` / `anyOf` (for polymorphic DTOs that springdoc emits via `@JsonSubTypes`
 or `@Schema(oneOf = ...)`). Per-group inner clones are produced wherever the active group
-makes a difference at any of those positions.
+makes a difference. Discriminator mapping targets are visited for reachability so the
+referenced components are never wrongly pruned.
 
 Nested DTOs reached through `@field:Valid` cascade into per-group clones too. Per JSR 380
 §5.4.5 the active group propagates into the cascade, so when an outer endpoint pins `Create`
@@ -1176,11 +1182,7 @@ parameter schemas would not match runtime behavior.
 
 ### Known limitations
 
-Two shapes are out of scope for the OpenAPI customizer. Both are uncommon in REST APIs and
-neither produces a broken document, but the customizer's group-aware cloning will not act on
-them.
-
-**Inline request bodies (no `$ref`).** When the body type is an anonymous container like
+**Inline request bodies (no `$ref`).** When the body type is an anonymous container such as
 `Map<String, Int>` or `List<String>`, springdoc emits the schema inline under
 `requestBody.content[*].schema` without registering a component:
 
@@ -1203,20 +1205,15 @@ requestBody:
 
 There is no named component to clone, so the per-group cloning step skips this operation.
 Validation annotations on the entries themselves (`Map<String, @NotBlank String>`) still
-flow through Jakarta validators at runtime; only the OpenAPI clone is skipped. Workaround:
-wrap the container in a named DTO, even a single-field one
-(`data class RatesRequest(val rates: Map<String, Int>)`).
+flow through Jakarta validators at runtime; only the OpenAPI clone is skipped.
 
-**`@JsonView`.** springdoc already emits per-view schema variants for properties carrying
-Jackson's `@JsonView`. Stacking the group-aware cloning on top would require tracking a 2D
-matrix of `(view, group)` combinations across nested cascades, and the per-property
-`x-validations` emission would need to track which view is active for each call. The
-customizer is not view-aware: it sees each view variant springdoc registers as if it were
-an independent component, which means a DTO using `@JsonView` together with
-`@Validated(Group::class)` may produce overlapping or duplicate clones. The runtime
-behavior is unaffected because views are a serialization concern; only the OpenAPI document
-shape diverges. Other Jackson annotations (`@JsonProperty`, `@JsonIgnore`, `@JsonFormat`,
-`@JsonInclude`) are unaffected and fully supported.
+**`@JsonView`.** springdoc emits per-view schema variants for properties carrying Jackson's
+`@JsonView`. The customizer is not view-aware: it sees each view variant springdoc
+registers as if it were an independent component, which means a DTO using `@JsonView`
+together with `@Validated(Group::class)` may produce overlapping or duplicate clones. The
+runtime behavior is unaffected because views are a serialization concern; only the OpenAPI
+document shape diverges. Other Jackson annotations (`@JsonProperty`, `@JsonIgnore`,
+`@JsonFormat`, `@JsonInclude`) are unaffected and fully supported.
 
 ### Generating client validation from `x-validations`
 

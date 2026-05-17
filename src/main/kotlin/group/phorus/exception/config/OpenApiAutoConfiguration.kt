@@ -6,9 +6,13 @@ import io.swagger.v3.core.converter.ModelConverters
 import io.swagger.v3.core.util.Json
 import io.swagger.v3.oas.models.OpenAPI
 import io.swagger.v3.oas.models.Operation
+import io.swagger.v3.oas.models.PathItem
+import io.swagger.v3.oas.models.headers.Header
+import io.swagger.v3.oas.models.links.Link
 import io.swagger.v3.oas.models.media.Content
 import io.swagger.v3.oas.models.media.MediaType
 import io.swagger.v3.oas.models.media.Schema
+import io.swagger.v3.oas.models.parameters.Parameter
 import io.swagger.v3.oas.models.responses.ApiResponse
 import org.springdoc.core.customizers.OpenApiCustomizer
 import org.springdoc.core.customizers.OperationCustomizer
@@ -23,6 +27,7 @@ import org.springframework.validation.annotation.Validated
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.method.HandlerMethod
 import java.util.concurrent.CopyOnWriteArrayList
+import io.swagger.v3.oas.models.parameters.RequestBody as OasRequestBody
 
 private const val API_ERROR_SCHEMA_NAME = "ApiError"
 private const val VALIDATION_ERROR_SCHEMA_NAME = "ValidationError"
@@ -497,21 +502,7 @@ class OpenApiAutoConfiguration {
         val reachable = mutableSetOf<String>()
         val toVisit = ArrayDeque<String>()
 
-        openApi.paths?.values?.forEach { pathItem ->
-            pathItem.readOperations().forEach { operation ->
-                operation.requestBody?.content?.values?.forEach { mediaType ->
-                    mediaType.schema?.let { collectRefsFromSchema(it, toVisit) }
-                }
-                operation.responses?.values?.forEach { response ->
-                    response.content?.values?.forEach { mediaType ->
-                        mediaType.schema?.let { collectRefsFromSchema(it, toVisit) }
-                    }
-                }
-                operation.parameters?.forEach { parameter ->
-                    parameter.schema?.let { collectRefsFromSchema(it, toVisit) }
-                }
-            }
-        }
+        forEachSchemaInDocument(openApi) { schema -> collectRefsFromSchema(schema, toVisit) }
 
         while (toVisit.isNotEmpty()) {
             val name = toVisit.removeFirst()
@@ -521,14 +512,91 @@ class OpenApiAutoConfiguration {
         return reachable
     }
 
+    /**
+     * Yields every [Schema] reachable from the OpenAPI document tree outside of
+     * `components.schemas`. Covers root-level `paths` and `webhooks`, every
+     * `components` map that can hold a schema (parameters, responses, requestBodies,
+     * headers, callbacks, pathItems), and every nested schema-bearing position inside
+     * an operation (parameters, requestBody, responses with headers and links, callbacks,
+     * mediaType.encoding[*].headers). Both `Parameter` and `Header` are walked through
+     * their `schema` and their alternate `content[*].schema` shape.
+     */
+    private fun forEachSchemaInDocument(openApi: OpenAPI, action: (Schema<*>) -> Unit) {
+        openApi.paths?.values?.forEach { walkPathItem(it, action) }
+        openApi.webhooks?.values?.forEach { walkPathItem(it, action) }
+        openApi.components?.let { components ->
+            components.pathItems?.values?.forEach { walkPathItem(it, action) }
+            components.parameters?.values?.forEach { walkParameter(it, action) }
+            components.responses?.values?.forEach { walkApiResponse(it, action) }
+            components.requestBodies?.values?.forEach { walkRequestBody(it, action) }
+            components.headers?.values?.forEach { walkHeader(it, action) }
+            components.callbacks?.values?.forEach { callback ->
+                callback.values?.forEach { walkPathItem(it, action) }
+            }
+            components.links?.values?.forEach { walkLink(it, action) }
+        }
+    }
+
+    private fun walkPathItem(pathItem: PathItem, action: (Schema<*>) -> Unit) {
+        pathItem.parameters?.forEach { walkParameter(it, action) }
+        pathItem.readOperations().forEach { walkOperation(it, action) }
+    }
+
+    private fun walkOperation(operation: Operation, action: (Schema<*>) -> Unit) {
+        operation.parameters?.forEach { walkParameter(it, action) }
+        operation.requestBody?.let { walkRequestBody(it, action) }
+        operation.responses?.values?.forEach { walkApiResponse(it, action) }
+        operation.callbacks?.values?.forEach { callback ->
+            callback.values?.forEach { walkPathItem(it, action) }
+        }
+    }
+
+    private fun walkParameter(parameter: Parameter, action: (Schema<*>) -> Unit) {
+        parameter.schema?.let(action)
+        parameter.content?.values?.forEach { walkMediaType(it, action) }
+    }
+
+    private fun walkHeader(header: Header, action: (Schema<*>) -> Unit) {
+        header.schema?.let(action)
+        header.content?.values?.forEach { walkMediaType(it, action) }
+    }
+
+    private fun walkRequestBody(requestBody: OasRequestBody, action: (Schema<*>) -> Unit) {
+        requestBody.content?.values?.forEach { walkMediaType(it, action) }
+    }
+
+    private fun walkApiResponse(response: ApiResponse, action: (Schema<*>) -> Unit) {
+        response.headers?.values?.forEach { walkHeader(it, action) }
+        response.content?.values?.forEach { walkMediaType(it, action) }
+        response.links?.values?.forEach { walkLink(it, action) }
+    }
+
+    /**
+     * `Link.headers` is `@Deprecated` in swagger ("not part of OpenAPI specification") but
+     * still serializable, so we walk it defensively for callers that hand-construct or use
+     * the deprecated field; the suppression silences the per-call warning.
+     */
+    @Suppress("DEPRECATION")
+    private fun walkLink(link: Link, action: (Schema<*>) -> Unit) {
+        link.headers?.values?.forEach { walkHeader(it, action) }
+    }
+
+    private fun walkMediaType(mediaType: MediaType, action: (Schema<*>) -> Unit) {
+        mediaType.schema?.let(action)
+        mediaType.encoding?.values?.forEach { encoding ->
+            encoding.headers?.values?.forEach { walkHeader(it, action) }
+        }
+    }
+
     private fun collectRefsFromSchema(schema: Schema<*>, acc: ArrayDeque<String>) {
-        schema.`$ref`?.removePrefix(SCHEMA_REF_PREFIX)?.let { acc += it }
-        schema.properties?.values?.forEach { collectRefsFromSchema(it, acc) }
-        schema.items?.let { collectRefsFromSchema(it, acc) }
-        schema.allOf?.forEach { collectRefsFromSchema(it, acc) }
-        schema.oneOf?.forEach { collectRefsFromSchema(it, acc) }
-        schema.anyOf?.forEach { collectRefsFromSchema(it, acc) }
-        (schema.additionalProperties as? Schema<*>)?.let { collectRefsFromSchema(it, acc) }
+        walkSubSchemas(schema) { sub ->
+            sub.`$ref`?.removePrefix(SCHEMA_REF_PREFIX)?.let { acc += it }
+            sub.discriminator?.mapping?.values?.forEach { value ->
+                // Discriminator mapping values are either a full `#/components/schemas/<name>`
+                // ref or a bare type identifier that resolves to the same component name.
+                acc += value.removePrefix(SCHEMA_REF_PREFIX)
+            }
+        }
     }
 
     /**
@@ -604,6 +672,19 @@ class OpenApiAutoConfiguration {
         schema.oneOf?.forEach { walkSubSchemas(it, action) }
         schema.anyOf?.forEach { walkSubSchemas(it, action) }
         (schema.additionalProperties as? Schema<*>)?.let { walkSubSchemas(it, action) }
+        schema.not?.let { walkSubSchemas(it, action) }
+        schema.patternProperties?.values?.forEach { walkSubSchemas(it, action) }
+        schema.prefixItems?.forEach { walkSubSchemas(it, action) }
+        schema.propertyNames?.let { walkSubSchemas(it, action) }
+        schema.contentSchema?.let { walkSubSchemas(it, action) }
+        schema.contains?.let { walkSubSchemas(it, action) }
+        (schema.unevaluatedProperties as? Schema<*>)?.let { walkSubSchemas(it, action) }
+        schema.additionalItems?.let { walkSubSchemas(it, action) }
+        schema.unevaluatedItems?.let { walkSubSchemas(it, action) }
+        schema.`if`?.let { walkSubSchemas(it, action) }
+        schema.`else`?.let { walkSubSchemas(it, action) }
+        schema.then?.let { walkSubSchemas(it, action) }
+        schema.dependentSchemas?.values?.forEach { walkSubSchemas(it, action) }
     }
 
     /**
@@ -751,15 +832,10 @@ class OpenApiAutoConfiguration {
      */
     private fun stripInternalGroupsFromAllSchemas(openApi: OpenAPI) {
         openApi.components?.schemas?.values?.forEach { schema ->
-            schema.properties?.values?.forEach { it.stripInternalGroupsFromXValidations() }
-            schema.stripInternalGroupsFromXValidations()
+            walkSubSchemas(schema) { it.stripInternalGroupsFromXValidations() }
         }
-        openApi.paths?.values?.forEach { pathItem ->
-            pathItem.readOperations().forEach { operation ->
-                operation.parameters?.forEach { parameter ->
-                    parameter.schema?.stripInternalGroupsFromXValidations()
-                }
-            }
+        forEachSchemaInDocument(openApi) { schema ->
+            walkSubSchemas(schema) { it.stripInternalGroupsFromXValidations() }
         }
     }
 
@@ -783,6 +859,87 @@ class OpenApiAutoConfiguration {
     private fun Schema<*>.deepCloneViaJson(): Schema<*>? {
         val mapper = Json.mapper()
         val json = mapper.writeValueAsString(this)
-        return mapper.readValue(json, Schema::class.java)
+        val clone = mapper.readValue(json, Schema::class.java) ?: return null
+        // The V30 SchemaMixin marks `getTypes` and several other JsonSchema (V31) fields
+        // as @JsonIgnore, so the JSON roundtrip silently drops them. springdoc emits
+        // JsonSchema (V31) instances whose primitive type lives in `types`, not `type`,
+        // and whose `specVersion` defaults to V30 on deserialization. Without this sync
+        // the clone serializes as `{type: object}` (the empty-type fallback) regardless
+        // of the original's actual type.
+        syncV31FieldsRecursively(this, clone)
+        return clone
+    }
+
+    /**
+     * Restores fields that the V30 [Json.mapper] silently drops during the JSON
+     * roundtrip and replaces V31 schema-typed sub-schemas with independent deep
+     * clones so the cloning rewrite never leaks into the original. The V30
+     * [io.swagger.v3.core.jackson.mixin.SchemaMixin] marks every JSON Schema
+     * 2020-12 field as `@JsonIgnore`, including the type indicator on
+     * [io.swagger.v3.oas.models.media.JsonSchema] (`Set<String> types`) and
+     * structural keywords like `contains`, `contentSchema`, `propertyNames`,
+     * `patternProperties`, `prefixItems`, `if` / `then` / `else`,
+     * `dependentSchemas`, `additionalItems`, `unevaluatedItems`. Sub-schemas
+     * carried by V30 keywords (`properties`, `items`, `allOf`, `oneOf`, `anyOf`,
+     * `additionalProperties`, `not`) survive the roundtrip and only need their
+     * V31 children synced in place.
+     */
+    private fun syncV31FieldsRecursively(original: Schema<*>, clone: Schema<*>) {
+        clone.specVersion = original.specVersion
+        if (original.types != null) clone.types = original.types.toMutableSet()
+        if (original.exclusiveMinimumValue != null) clone.exclusiveMinimumValue = original.exclusiveMinimumValue
+        if (original.exclusiveMaximumValue != null) clone.exclusiveMaximumValue = original.exclusiveMaximumValue
+        if (original.contentEncoding != null) clone.contentEncoding = original.contentEncoding
+        if (original.contentMediaType != null) clone.contentMediaType = original.contentMediaType
+        if (original.`$id` != null) clone.`$id` = original.`$id`
+        if (original.`$anchor` != null) clone.`$anchor` = original.`$anchor`
+        if (original.`$schema` != null) clone.`$schema` = original.`$schema`
+        if (original.maxContains != null) clone.maxContains = original.maxContains
+        if (original.minContains != null) clone.minContains = original.minContains
+        if (original.`$comment` != null) clone.`set$comment`(original.`$comment`)
+        original.getConst()?.let { clone.setConst(it) }
+        if (original.booleanSchemaValue != null) clone.booleanSchemaValue = original.booleanSchemaValue
+        // examples is `List<T>`; with `Schema<*>` the type parameter is unknown, so we
+        // route through a star-projected assignment via the raw setter.
+        if (original.examples != null) {
+            @Suppress("UNCHECKED_CAST")
+            (clone as Schema<Any?>).examples = (original.examples as List<Any?>).toMutableList()
+        }
+        if (original.dependentRequired != null) {
+            clone.dependentRequired = original.dependentRequired
+                .mapValuesTo(mutableMapOf()) { (_, v) -> v.toMutableList() }
+        }
+
+        // V31 schema-typed fields: deep-clone from the original so subsequent
+        // mutation of the clone (e.g. group-aware `$ref` rewriting) cannot leak
+        // into the original instance.
+        clone.patternProperties = original.patternProperties?.mapValuesTo(mutableMapOf()) { (_, v) -> v.deepCloneViaJson()!! }
+        clone.dependentSchemas = original.dependentSchemas?.mapValuesTo(mutableMapOf()) { (_, v) -> v.deepCloneViaJson()!! }
+        clone.prefixItems = original.prefixItems?.mapTo(mutableListOf()) { it.deepCloneViaJson()!! }
+        clone.contentSchema = original.contentSchema?.deepCloneViaJson()
+        clone.contains = original.contains?.deepCloneViaJson()
+        clone.propertyNames = original.propertyNames?.deepCloneViaJson()
+        clone.additionalItems = original.additionalItems?.deepCloneViaJson()
+        clone.unevaluatedItems = original.unevaluatedItems?.deepCloneViaJson()
+        clone.`if` = original.`if`?.deepCloneViaJson()
+        clone.`else` = original.`else`?.deepCloneViaJson()
+        clone.then = original.then?.deepCloneViaJson()
+        (original.unevaluatedProperties as? Schema<*>)?.let {
+            clone.unevaluatedProperties = it.deepCloneViaJson()
+        }
+
+        // V30 schema-typed fields already roundtripped; recurse to fix V31
+        // children nested inside them.
+        original.properties?.forEach { (name, originalProp) ->
+            clone.properties?.get(name)?.let { syncV31FieldsRecursively(originalProp, it) }
+        }
+        original.items?.let { o -> clone.items?.let { c -> syncV31FieldsRecursively(o, c) } }
+        original.allOf?.forEachIndexed { i, o -> clone.allOf?.getOrNull(i)?.let { syncV31FieldsRecursively(o, it) } }
+        original.oneOf?.forEachIndexed { i, o -> clone.oneOf?.getOrNull(i)?.let { syncV31FieldsRecursively(o, it) } }
+        original.anyOf?.forEachIndexed { i, o -> clone.anyOf?.getOrNull(i)?.let { syncV31FieldsRecursively(o, it) } }
+        (original.additionalProperties as? Schema<*>)?.let { o ->
+            (clone.additionalProperties as? Schema<*>)?.let { c -> syncV31FieldsRecursively(o, c) }
+        }
+        original.not?.let { o -> clone.not?.let { c -> syncV31FieldsRecursively(o, c) } }
     }
 }

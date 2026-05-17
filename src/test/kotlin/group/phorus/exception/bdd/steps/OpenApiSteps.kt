@@ -249,6 +249,34 @@ class OpenApiSteps(
             "Property $schemaName.$propertyName \$ref mismatch")
     }
 
+    @Then("the OpenAPI schema {string} property {string} has type {string}")
+    fun `schema property has type`(schemaName: String, propertyName: String, expectedType: String) {
+        val property = readProperty(schemaName, propertyName)
+        val actualType = property.get("type")?.asString()
+        assertEquals(expectedType, actualType,
+            "Schema $schemaName.$propertyName type mismatch. Property: $property")
+    }
+
+    @Then("the OpenAPI schema {string} property {string} property {string} equals {string}")
+    fun `schema property property equals`(schemaName: String, propertyName: String, field: String, expected: String) {
+        val property = readProperty(schemaName, propertyName)
+        val actual = property.get(field)?.asString()
+        assertEquals(expected, actual,
+            "Schema $schemaName.$propertyName.$field mismatch. Property: $property")
+    }
+
+    @Then("the OpenAPI schema {string} property {string} has enum values {string}")
+    fun `schema property has enum values`(schemaName: String, propertyName: String, csv: String) {
+        val property = readProperty(schemaName, propertyName)
+        val enumNode = property.get("enum")
+            ?: error("Schema $schemaName.$propertyName has no enum. Property: $property")
+        assertTrue(enumNode.isArray, "enum should be an array")
+        val actual = (0 until enumNode.size()).map { enumNode.get(it).asString() }.toSet()
+        val expected = csv.split(",").map { it.trim() }.toSet()
+        assertEquals(expected, actual,
+            "Schema $schemaName.$propertyName.enum mismatch. Property: $property")
+    }
+
     @Then("the OpenAPI body schema for POST {string} content type {string} references {string}")
     fun `body schema for content type references`(path: String, contentType: String, targetComponent: String) {
         val root = readOpenApiRoot()

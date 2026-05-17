@@ -387,6 +387,40 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
     And the OpenAPI schema "ApiError" does not have "metadata" in its required fields
     And the OpenAPI schema "ApiError" does not have "validationErrors" in its required fields
 
+  # JSON Schema `type` must survive group cloning. The original schema springdoc emits
+  # carries `type: string` / `type: integer` etc.; the cloned per-group component must
+  # carry the same. Drift here breaks SDK generators that read the spec.
+
+  Scenario: Cloned schema preserves the property type
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupsDto" property "name" has type "string"
+    And the OpenAPI schema "GroupsDto_CreateGroup" property "name" has type "string"
+    And the OpenAPI schema "GroupsDto_UpdateGroup" property "name" has type "string"
+
+  Scenario: Cloned schema preserves the integer property type
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" property "minInt" has type "integer"
+    And the OpenAPI schema "GroupedValidatorsDto_CreateGroup" property "minInt" property "format" equals "int32"
+
+  Scenario: Cloned schema preserves UUID format
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "id" has type "string"
+    And the OpenAPI schema "GroupedRichDto_CreateGroup" property "id" property "format" equals "uuid"
+
+  Scenario: Cloned schema preserves @Schema description, title, and example
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "name" property "description" equals "Display name"
+    And the OpenAPI schema "GroupedRichDto_CreateGroup" property "name" property "title" equals "Name"
+    And the OpenAPI schema "GroupedRichDto_CreateGroup" property "name" property "example" equals "Alice"
+
+  Scenario: Cloned schema preserves enum values
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "status" has enum values "ACTIVE,INACTIVE"
+
+  Scenario: Cloned schema preserves default values
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "status" property "default" equals "ACTIVE"
+
   # Class-level @Validated(Group): Spring's method-validation interceptor falls back to
   # the class-level @Validated value when no parameter-level or method-level @Validated
   # is present. The customizer reads class-level too so the OpenAPI document matches
