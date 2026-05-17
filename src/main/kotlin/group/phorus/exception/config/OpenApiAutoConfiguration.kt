@@ -25,8 +25,11 @@ import org.springframework.web.method.HandlerMethod
 import java.util.concurrent.CopyOnWriteArrayList
 
 private const val API_ERROR_SCHEMA_NAME = "ApiError"
+private const val VALIDATION_ERROR_SCHEMA_NAME = "ValidationError"
 private const val API_ERROR_REF = "#/components/schemas/$API_ERROR_SCHEMA_NAME"
 private const val SCHEMA_REF_PREFIX = "#/components/schemas/"
+private val API_ERROR_REQUIRED_FIELDS = listOf("status", "title", "code", "timestamp")
+private val VALIDATION_ERROR_REQUIRED_FIELDS = listOf("obj")
 private const val X_VALIDATIONS_EXTENSION = "x-validations"
 private const val X_VALIDATIONS_ENTRY_GROUPS = "groups"
 private const val X_VALIDATIONS_ENTRY_RULE = "rule"
@@ -110,6 +113,11 @@ class OpenApiAutoConfiguration {
             validationErrorSchemas.forEach { (name, schema) ->
                 openApi.components.addSchemas(name, schema)
             }
+
+            openApi.components.schemas[API_ERROR_SCHEMA_NAME]
+                ?.required = API_ERROR_REQUIRED_FIELDS.toMutableList()
+            openApi.components.schemas[VALIDATION_ERROR_SCHEMA_NAME]
+                ?.required = VALIDATION_ERROR_REQUIRED_FIELDS.toMutableList()
 
             val errorSchemaRef = Schema<ApiError>().`$ref`(API_ERROR_REF)
 
@@ -394,8 +402,9 @@ class OpenApiAutoConfiguration {
      *  - `null` when the operation has no `@RequestBody` parameter (nothing to clone).
      *  - empty list when the operation has a body but no `@Validated` pin anywhere (default group).
      *  - non-empty list of simple group class names when `@Validated(Group::class)` is found on
-     *    the parameter or, as a fallback, on the controller method itself. Spring 6.1+ honors
-     *    both placements at runtime, so the OpenAPI emission has to honor both too.
+     *    the parameter, the controller method, or the controller class. Spring's
+     *    `MethodValidationInterceptor` falls back from parameter to method to class when
+     *    resolving the active group, so the OpenAPI emission walks the same chain.
      */
     private fun HandlerMethod.requestBodyValidationGroups(): List<String>? {
         for (parameter in methodParameters) {
@@ -404,6 +413,8 @@ class OpenApiAutoConfiguration {
                 if (paramValidated != null) return paramValidated.value.toGroupNames()
                 val methodValidated = method.getAnnotation(Validated::class.java)
                 if (methodValidated != null) return methodValidated.value.toGroupNames()
+                val classValidated = beanType.getAnnotation(Validated::class.java)
+                if (classValidated != null) return classValidated.value.toGroupNames()
                 return emptyList()
             }
         }
@@ -429,21 +440,19 @@ class OpenApiAutoConfiguration {
         val needsCloneCache: MutableMap<String, Boolean> = mutableMapOf()
 
         operationGroupBindings.forEach { binding ->
-            val mediaType = binding.operation.requestBody
-                ?.content
-                ?.values
-                ?.firstOrNull()
-                ?: return@forEach
-            val schemaNode = mediaType.schema ?: return@forEach
-            val originalRef = schemaNode.`$ref` ?: return@forEach
-            val componentName = originalRef.removePrefix(SCHEMA_REF_PREFIX)
-            val derivedName = ensureGroupClone(components, componentName, binding.groups, derivedNames, needsCloneCache)
-                ?: return@forEach
-            // Replace the schema on the mediaType with a fresh `$ref` holder. springdoc
-            // reuses the same Schema instance across operations that take the same DTO
-            // with the same parameter-level annotation set; mutating its `$ref` in place
-            // would leak the rewrite into sibling operations.
-            mediaType.schema = Schema<Any>().`$ref`("$SCHEMA_REF_PREFIX$derivedName")
+            val mediaTypes = binding.operation.requestBody?.content?.values ?: return@forEach
+            mediaTypes.forEach { mediaType ->
+                val schemaNode = mediaType.schema ?: return@forEach
+                val originalRef = schemaNode.`$ref` ?: return@forEach
+                val componentName = originalRef.removePrefix(SCHEMA_REF_PREFIX)
+                val derivedName = ensureGroupClone(components, componentName, binding.groups, derivedNames, needsCloneCache)
+                    ?: return@forEach
+                // Replace the schema on the mediaType with a fresh `$ref` holder. springdoc
+                // reuses the same Schema instance across operations that take the same DTO
+                // with the same parameter-level annotation set; mutating its `$ref` in place
+                // would leak the rewrite into sibling operations.
+                mediaType.schema = Schema<Any>().`$ref`("$SCHEMA_REF_PREFIX$derivedName")
+            }
         }
         return derivedNames.values.toSet()
     }
@@ -639,12 +648,18 @@ class OpenApiAutoConfiguration {
     }
 
     private fun scopeSchemaToActiveGroups(schema: Schema<*>, activeGroups: Set<String>) {
+        val existingRequired = schema.required?.toSet().orEmpty()
         val newRequired = mutableListOf<String>()
         schema.properties?.forEach { (propName, propSchema) ->
+            val hadAnyXValidations =
+                (propSchema.extensions?.get(X_VALIDATIONS_EXTENSION) as? List<*>)?.isNotEmpty() == true
             val keptEntries = propSchema.filterValidationsForActiveGroups(activeGroups)
             applyJsonSchemaFromEntries(propSchema, keptEntries)
-            if (keptEntries.any { it[X_VALIDATIONS_ENTRY_RULE] in PRESENCE_RULES }) {
-                newRequired += propName
+            val derivedFromKept = keptEntries.any { it[X_VALIDATIONS_ENTRY_RULE] in PRESENCE_RULES }
+            when {
+                derivedFromKept -> newRequired += propName
+                hadAnyXValidations -> Unit
+                propName in existingRequired -> newRequired += propName
             }
         }
         schema.required = newRequired.takeIf { it.isNotEmpty() }

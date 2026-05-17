@@ -290,4 +290,15 @@ class TestController {
 
     @PostMapping("/v1/testResponseOnly")
     fun testResponseOnly(): ResponseOnlyDto = ResponseOnlyDto(name = "hi")
+
+    @PostMapping(
+        "/v1/testMultiMediaCreate",
+        consumes = [
+            org.springframework.http.MediaType.APPLICATION_JSON_VALUE,
+            org.springframework.http.MediaType.APPLICATION_XML_VALUE,
+        ],
+    )
+    fun testMultiMediaCreate(
+        @RequestBody @Validated(CreateGroup::class) body: GroupsDto,
+    ): String = "OK"
 }

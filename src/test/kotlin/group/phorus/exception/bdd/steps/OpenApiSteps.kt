@@ -86,6 +86,16 @@ class OpenApiSteps(
             "Schema $schemaName.required does not contain '$fieldName'. Found: $values")
     }
 
+    @Then("the OpenAPI schema {string} does not have {string} in its required fields")
+    fun `schema does not have required field`(schemaName: String, fieldName: String) {
+        val schema = readSchema(schemaName)
+        val required = schema.get("required") ?: return
+        if (!required.isArray) return
+        val values = (0 until required.size()).map { required.get(it).asString() }
+        assertTrue(!values.contains(fieldName),
+            "Schema $schemaName.required should not contain '$fieldName'. Found: $values")
+    }
+
     @Then("the OpenAPI body schema for POST {string} has property {string} with x-validations")
     fun `body schema has property with x-validations`(
         path: String,
@@ -237,6 +247,29 @@ class OpenApiSteps(
         val actual = ref.removePrefix("#/components/schemas/")
         assertEquals(targetComponent, actual,
             "Property $schemaName.$propertyName \$ref mismatch")
+    }
+
+    @Then("the OpenAPI body schema for POST {string} content type {string} references {string}")
+    fun `body schema for content type references`(path: String, contentType: String, targetComponent: String) {
+        val root = readOpenApiRoot()
+        val pathNode = root.get("paths")?.get(path)
+            ?: throw IllegalStateException("Path $path not found in OpenAPI document")
+        val operation = pathNode.get("post")
+            ?: throw IllegalStateException("POST operation not found at $path")
+        val schemaNode = operation.get("requestBody")
+            ?.get("content")
+            ?.get(contentType)
+            ?.get("schema")
+            ?: throw IllegalStateException(
+                "Body schema for content type $contentType missing on POST $path"
+            )
+        val ref = schemaNode.get("\$ref")?.asString()
+            ?: error("Body schema for content type $contentType on POST $path has no \$ref. Schema: $schemaNode")
+        val actual = ref.removePrefix("#/components/schemas/")
+        assertEquals(
+            targetComponent, actual,
+            "Body schema for POST $path content type $contentType \$ref mismatch",
+        )
     }
 
     @Then("the OpenAPI schema {string} items property {string} references {string}")

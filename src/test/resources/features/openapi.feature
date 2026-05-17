@@ -371,6 +371,53 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
     When the caller fetches the OpenAPI document
     Then the OpenAPI document declares schema "ResponseOnlyDto"
 
+  # ApiError and ValidationError are registered manually via ModelConverters.read, which
+  # bypasses springdoc nullability-driven required derivation. The customizer must set
+  # required[] explicitly so consumers can rely on non-nullable Kotlin fields actually
+  # arriving on every error response.
+
+  Scenario: ApiError schema marks every non-nullable field as required
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "ApiError" has "status" in its required fields
+    And the OpenAPI schema "ApiError" has "title" in its required fields
+    And the OpenAPI schema "ApiError" has "code" in its required fields
+    And the OpenAPI schema "ApiError" has "timestamp" in its required fields
+    And the OpenAPI schema "ApiError" does not have "detail" in its required fields
+    And the OpenAPI schema "ApiError" does not have "source" in its required fields
+    And the OpenAPI schema "ApiError" does not have "metadata" in its required fields
+    And the OpenAPI schema "ApiError" does not have "validationErrors" in its required fields
+
+  # Class-level @Validated(Group): Spring's method-validation interceptor falls back to
+  # the class-level @Validated value when no parameter-level or method-level @Validated
+  # is present. The customizer reads class-level too so the OpenAPI document matches
+  # what Spring actually enforces at runtime.
+
+  Scenario: Class-level @Validated(Create) on the controller clones the body schema for the Create group
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI body schema for POST "/v1/testClassLevelValidatedCreate" has property "name" with x-validations
+      | rule      | code     |
+      | notBlank  | BLANK    |
+      | maxLength | TOO_LONG |
+    And the OpenAPI body schema for POST "/v1/testClassLevelValidatedCreate" has "name" in its required fields
+
+  # Multi media-type request bodies: a controller method declaring multiple `consumes`
+  # values gets one schema entry per media type. The customizer rewrites every entry to
+  # point at the per-group clone, not just the first.
+
+  Scenario: Multi-media-type body schema is cloned for every declared content type
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI body schema for POST "/v1/testMultiMediaCreate" content type "application/json" references "GroupsDto_CreateGroup"
+    And the OpenAPI body schema for POST "/v1/testMultiMediaCreate" content type "application/xml" references "GroupsDto_CreateGroup"
+
+  Scenario: ValidationError schema marks the non-nullable obj field as required
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "ValidationError" has "obj" in its required fields
+    And the OpenAPI schema "ValidationError" does not have "field" in its required fields
+    And the OpenAPI schema "ValidationError" does not have "code" in its required fields
+    And the OpenAPI schema "ValidationError" does not have "rejectedValue" in its required fields
+    And the OpenAPI schema "ValidationError" does not have "message" in its required fields
+    And the OpenAPI schema "ValidationError" does not have "metadata" in its required fields
+
   # JSON Schema validators (minLength, maxLength, pattern, minimum, ...) emitted by
   # springdoc from a constraint annotation must follow the same group filtering as the
   # `x-validations` array. Otherwise an FE codegen reading the spec would emit a

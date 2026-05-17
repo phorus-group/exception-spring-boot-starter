@@ -48,6 +48,7 @@ to get both.
   - [Disabling the OpenAPI integration](#disabling-the-openapi-integration)
   - [`x-validations` OpenAPI extension](#x-validations-openapi-extension)
   - [Validation groups](#validation-groups)
+  - [Known limitations](#known-limitations)
   - [Generating client validation from `x-validations`](#generating-client-validation-from-x-validations)
 - [Building and contributing](#building-and-contributing)
 
@@ -1041,8 +1042,13 @@ paths:
 
 When an operation pins one or more Jakarta validation groups via `@Validated(Group::class)`,
 its body schema becomes a group-specific clone of the DTO component. The pin is read from the
-`@RequestBody` parameter first and falls back to a method-level `@Validated(Group::class)`,
-matching Spring's runtime behavior. The clone's `x-validations` array drops constraint entries
+`@RequestBody` parameter first, then from a method-level `@Validated(Group::class)`, then from
+a class-level `@Validated(Group::class)` on the controller. This mirrors how Spring's
+`MethodValidationInterceptor` resolves the active group at runtime.
+
+When the controller declares multiple `consumes` media types on the same method, every entry
+in `requestBody.content` is rewritten to point at the same per-group clone, so JSON and XML
+(or any other declared content type) reference the matching schema component. The clone's `x-validations` array drops constraint entries
 whose `groups()` attribute does not include any of the active groups, and the clone's
 `required` array is derived from the kept presence-rule entries (`notBlank`, `required`,
 `minLength`, `minItems`).
@@ -1167,6 +1173,50 @@ schema, with no per-group cloning. Spring's `@RequestBody` resolver is the only 
 honors groups at the parameter level at runtime; path / query / header / cookie validation
 fires against the constraint annotations directly without consulting groups, so per-group
 parameter schemas would not match runtime behavior.
+
+### Known limitations
+
+Two shapes are out of scope for the OpenAPI customizer. Both are uncommon in REST APIs and
+neither produces a broken document, but the customizer's group-aware cloning will not act on
+them.
+
+**Inline request bodies (no `$ref`).** When the body type is an anonymous container like
+`Map<String, Int>` or `List<String>`, springdoc emits the schema inline under
+`requestBody.content[*].schema` without registering a component:
+
+```kotlin
+@PostMapping("/rates")
+fun saveRates(
+    @RequestBody @Validated(Update::class) body: Map<String, Int>,
+): String = "OK"
+```
+
+```yaml
+requestBody:
+  content:
+    application/json:
+      schema:
+        type: object
+        additionalProperties:
+          type: integer
+```
+
+There is no named component to clone, so the per-group cloning step skips this operation.
+Validation annotations on the entries themselves (`Map<String, @NotBlank String>`) still
+flow through Jakarta validators at runtime; only the OpenAPI clone is skipped. Workaround:
+wrap the container in a named DTO, even a single-field one
+(`data class RatesRequest(val rates: Map<String, Int>)`).
+
+**`@JsonView`.** springdoc already emits per-view schema variants for properties carrying
+Jackson's `@JsonView`. Stacking the group-aware cloning on top would require tracking a 2D
+matrix of `(view, group)` combinations across nested cascades, and the per-property
+`x-validations` emission would need to track which view is active for each call. The
+customizer is not view-aware: it sees each view variant springdoc registers as if it were
+an independent component, which means a DTO using `@JsonView` together with
+`@Validated(Group::class)` may produce overlapping or duplicate clones. The runtime
+behavior is unaffected because views are a serialization concern; only the OpenAPI document
+shape diverges. Other Jackson annotations (`@JsonProperty`, `@JsonIgnore`, `@JsonFormat`,
+`@JsonInclude`) are unaffected and fully supported.
 
 ### Generating client validation from `x-validations`
 
