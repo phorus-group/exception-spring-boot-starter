@@ -618,7 +618,11 @@ class OpenApiAutoConfiguration {
         derivedNames[cacheKey]?.let { return it }
 
         val original = components.schemas?.get(componentName) ?: return null
-        val derivedName = "${componentName}_${groups.joinToString("_")}"
+        // Derived names concatenate component name + group names with no separator so the
+        // result is a single PascalCase identifier (e.g. `OrganizationRequestCreate`).
+        // OpenAPI tools such as Orval treat underscored component names like
+        // `OrganizationRequest_Create` as unresolvable refs and fall back to `zod.unknown()`.
+        val derivedName = "${componentName}${groups.joinToString("")}"
         // Reserve the name BEFORE recursing so a cycle (DTO referencing itself) terminates
         // by hitting this cache entry instead of looping.
         derivedNames[cacheKey] = derivedName

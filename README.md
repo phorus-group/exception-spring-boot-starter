@@ -678,9 +678,11 @@ The second runs four passes in order:
    component; if the inner carries group-scoped constraints directly or transitively, it
    recursively clones it under the same active group set and rewrites the property's `$ref` to
    point at the inner clone. This matches JSR 380 §5.4.5 group propagation through `@Valid`
-   cascading. The clone gets a derived name (`OriginalName_GroupName1_GroupName2`, with groups
-   sorted alphabetically for determinism). Finally, the operation's request body schema is
-   replaced with a fresh `$ref` holder pointing at the clone.
+   cascading. The clone gets a derived name (`OriginalNameGroupName1GroupName2`, concatenated
+   with the group names sorted alphabetically for determinism, no separator so the result is a
+   single PascalCase identifier OpenAPI tooling like Orval treats as a valid component name).
+   Finally, the operation's request body schema is replaced with a fresh `$ref` holder pointing
+   at the clone.
 2. Default-group view of the originals. Operations that pin no group (`@Valid`, or `@Validated`
    with no value, or no validation annotation at all) run under the `Default` group at runtime,
    and constraints with an explicit `groups()` attribute are not part of `Default`.
@@ -784,7 +786,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UserDto_Create'   # rewritten by the group customizer
+              $ref: '#/components/schemas/UserDtoCreate'   # rewritten by the group customizer
       responses:
         '200': { description: OK }
         default:                                # added by the error customizer
@@ -806,7 +808,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UserDto_Update'   # rewritten by the group customizer
+              $ref: '#/components/schemas/UserDtoUpdate'   # rewritten by the group customizer
       responses:
         '200': { description: OK }
         default:
@@ -830,7 +832,7 @@ components:
     # @Email entry has no groups attribute and survives; the other fields' x-validations
     # would be empty and `required` would not contain name or username).
 
-    UserDto_Create:                             # per-group clone, body of POST /users
+    UserDtoCreate:                             # per-group clone, body of POST /users
       type: object
       required: [name, username]                # derived from the kept notBlank entries
       properties:
@@ -855,9 +857,9 @@ components:
                                                 # the maxLength JSON Schema validator is dropped with it, so the
                                                 # Create clone matches what the BE enforces under Create (no bound)
         address:
-          $ref: '#/components/schemas/AddressDto_Create'   # nested cascade clone
+          $ref: '#/components/schemas/AddressDtoCreate'   # nested cascade clone
 
-    AddressDto_Create:                          # per-group clone, reached from UserDto_Create.address
+    AddressDtoCreate:                          # per-group clone, reached from UserDtoCreate.address
       type: object
       required: [street]
       properties:
@@ -867,7 +869,7 @@ components:
             - rule: notBlank                    # kept: street has groups = [Create]
               code: BLANK
 
-    UserDto_Update:                             # per-group clone, body of PATCH /users/{id}
+    UserDtoUpdate:                             # per-group clone, body of PATCH /users/{id}
       type: object
       required: [username]                      # only username has a presence rule active for Update
       properties:
@@ -892,19 +894,19 @@ components:
             - rule: maxLength                   # kept: Update matches the field's groups = [Update]
               code: TOO_LONG
         address:
-          $ref: '#/components/schemas/AddressDto_Update'   # nested cascade clone
+          $ref: '#/components/schemas/AddressDtoUpdate'   # nested cascade clone
 
-    AddressDto_Update:                          # per-group clone, reached from UserDto_Update.address
+    AddressDtoUpdate:                          # per-group clone, reached from UserDtoUpdate.address
       type: object                              # no required field; street's only entry was Create-only and got dropped
       properties:
         street:
           type: string                          # carries no x-validations under Update
 ```
 
-An operation that pins `@Validated(Create::class)` references `UserDto_Create`, one pinned to
-`Update` references `UserDto_Update`, and one that pins no group (either `@Valid` or
+An operation that pins `@Validated(Create::class)` references `UserDtoCreate`, one pinned to
+`Update` references `UserDtoUpdate`, and one that pins no group (either `@Valid` or
 `@Validated` with no value) would reference `UserDto` directly. The same logic applied to the
-nested `address` field produces the matching `AddressDto_Create` / `AddressDto_Update` pair,
+nested `address` field produces the matching `AddressDtoCreate` / `AddressDtoUpdate` pair,
 and would produce a default-group view of `AddressDto` if any consumer pinned no group.
 
 For the contract details emitted at each step, see the subsections below.
@@ -1081,11 +1083,11 @@ class OrganizationController {
 ```
 
 The generated spec carries two derived components alongside the original. The `create`
-operation references `OrganizationRequest_Create`, the `update` operation references
-`OrganizationRequest_Update`.
+operation references `OrganizationRequestCreate`, the `update` operation references
+`OrganizationRequestUpdate`.
 
 ```yaml
-OrganizationRequest_Create:
+OrganizationRequestCreate:
   type: object
   required:
     - name
@@ -1099,7 +1101,7 @@ OrganizationRequest_Create:
         - rule: maxLength
           code: TOO_LONG
 
-OrganizationRequest_Update:
+OrganizationRequestUpdate:
   type: object
   properties:
     name:
@@ -1110,9 +1112,11 @@ OrganizationRequest_Update:
           code: TOO_LONG
 ```
 
-Derived component names follow the `OriginalName_GroupName1_GroupName2` shape with group
-names sorted alphabetically, so the same group set always produces the same name and the
-same operation references the same clone across builds.
+Derived component names follow the `OriginalNameGroupName1GroupName2` shape with group
+names sorted alphabetically and concatenated without a separator (a single PascalCase
+identifier so OpenAPI tooling treats it as a valid component name). The same group set
+always produces the same name and the same operation references the same clone across
+builds.
 
 Operations that pin no group reference the original component, which is filtered to its
 **default-group view**. Both `@Valid` and `@Validated` with no value (e.g. `@Validated body`)
@@ -1168,11 +1172,11 @@ data class InnerDto(
 )
 ```
 
-For a `create` endpoint pinned to `Create`, the spec carries both `OuterDto_Create` and
-`InnerDto_Create`. The Create clone's `email` is in `required` and its `displayName` is not,
+For a `create` endpoint pinned to `Create`, the spec carries both `OuterDtoCreate` and
+`InnerDtoCreate`. The Create clone's `email` is in `required` and its `displayName` is not,
 because `displayName`'s notBlank is scoped to `Update` and gets dropped from the Create
-clone's `x-validations`. The Update endpoint produces the mirrored `OuterDto_Update` and
-`InnerDto_Update`.
+clone's `x-validations`. The Update endpoint produces the mirrored `OuterDtoUpdate` and
+`InnerDtoUpdate`.
 
 Parameter constraints carrying `groups()` are emitted unconditionally on the parameter
 schema, with no per-group cloning. Spring's `@RequestBody` resolver is the only path that

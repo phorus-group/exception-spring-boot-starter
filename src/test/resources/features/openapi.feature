@@ -260,16 +260,16 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Three-level cascade clones every nested component per active group
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "Level1Dto_CreateGroup" has "name" in its required fields
-    And the OpenAPI schema "Level2Dto_CreateGroup" has "name" in its required fields
-    And the OpenAPI schema "Level3Dto_CreateGroup" has "name" in its required fields
-    And the OpenAPI schema "Level1Dto_CreateGroup" property "level2" references "Level2Dto_CreateGroup"
-    And the OpenAPI schema "Level2Dto_CreateGroup" property "level3" references "Level3Dto_CreateGroup"
+    Then the OpenAPI schema "Level1DtoCreateGroup" has "name" in its required fields
+    And the OpenAPI schema "Level2DtoCreateGroup" has "name" in its required fields
+    And the OpenAPI schema "Level3DtoCreateGroup" has "name" in its required fields
+    And the OpenAPI schema "Level1DtoCreateGroup" property "level2" references "Level2DtoCreateGroup"
+    And the OpenAPI schema "Level2DtoCreateGroup" property "level3" references "Level3DtoCreateGroup"
 
   Scenario: Outer is cloned but inner without group-scoped constraints keeps the original ref
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "OuterWithPlainInnerDto_CreateGroup" has "name" in its required fields
-    And the OpenAPI schema "OuterWithPlainInnerDto_CreateGroup" property "plain" references "PlainInnerDto"
+    Then the OpenAPI schema "OuterWithPlainInnerDtoCreateGroup" has "name" in its required fields
+    And the OpenAPI schema "OuterWithPlainInnerDtoCreateGroup" property "plain" references "PlainInnerDto"
 
   Scenario: Parameter dedupes constraints that produce the same rule
     When the caller fetches the OpenAPI document
@@ -284,43 +284,43 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
   Scenario: GroupsDto is registered alongside its per-group clones as three distinct components
     When the caller fetches the OpenAPI document
     Then the OpenAPI document declares schema "GroupsDto"
-    And the OpenAPI document declares schema "GroupsDto_CreateGroup"
-    And the OpenAPI document declares schema "GroupsDto_UpdateGroup"
+    And the OpenAPI document declares schema "GroupsDtoCreateGroup"
+    And the OpenAPI document declares schema "GroupsDtoUpdateGroup"
 
   Scenario: InnerGroupsDto is registered alongside its per-group clones as three distinct components
     When the caller fetches the OpenAPI document
     Then the OpenAPI document declares schema "InnerGroupsDto"
-    And the OpenAPI document declares schema "InnerGroupsDto_CreateGroup"
-    And the OpenAPI document declares schema "InnerGroupsDto_UpdateGroup"
+    And the OpenAPI document declares schema "InnerGroupsDtoCreateGroup"
+    And the OpenAPI document declares schema "InnerGroupsDtoUpdateGroup"
 
   Scenario: Create clone carries only the Create-group entries on its name property
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupsDto_CreateGroup" has property "name" with x-validations
+    Then the OpenAPI schema "GroupsDtoCreateGroup" has property "name" with x-validations
       | rule      | code     |
       | notBlank  | BLANK    |
       | maxLength | TOO_LONG |
-    And the OpenAPI schema "GroupsDto_CreateGroup" has "name" in its required fields
+    And the OpenAPI schema "GroupsDtoCreateGroup" has "name" in its required fields
 
   Scenario: Update clone carries only the Update-group entries on its name property
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupsDto_UpdateGroup" has property "name" with x-validations
+    Then the OpenAPI schema "GroupsDtoUpdateGroup" has property "name" with x-validations
       | rule      | code     |
       | maxLength | TOO_LONG |
-    And the OpenAPI document does not declare schema "GroupsDto_UpdateGroup_CreateGroup"
+    And the OpenAPI document does not declare schema "GroupsDtoUpdateGroupCreateGroup"
 
   Scenario: Inner Create clone carries only Create-group entries
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "InnerGroupsDto_CreateGroup" has property "email" with x-validations
+    Then the OpenAPI schema "InnerGroupsDtoCreateGroup" has property "email" with x-validations
       | rule     | code  |
       | notBlank | BLANK |
-    And the OpenAPI schema "InnerGroupsDto_CreateGroup" has "email" in its required fields
+    And the OpenAPI schema "InnerGroupsDtoCreateGroup" has "email" in its required fields
 
   Scenario: Inner Update clone carries only Update-group entries
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "InnerGroupsDto_UpdateGroup" has property "displayName" with x-validations
+    Then the OpenAPI schema "InnerGroupsDtoUpdateGroup" has property "displayName" with x-validations
       | rule     | code  |
       | notBlank | BLANK |
-    And the OpenAPI schema "InnerGroupsDto_UpdateGroup" has "displayName" in its required fields
+    And the OpenAPI schema "InnerGroupsDtoUpdateGroup" has "displayName" in its required fields
 
   # Default-group view of the original component.
   # @Valid (no @Validated) runs the Default group at runtime, so group-scoped constraints
@@ -364,7 +364,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: A DTO consumed only via @Validated(Group) leaves no original component in the spec
     When the caller fetches the OpenAPI document
-    Then the OpenAPI document declares schema "OnlyGroupsOrphanDto_CreateGroup"
+    Then the OpenAPI document declares schema "OnlyGroupsOrphanDtoCreateGroup"
     And the OpenAPI document does not declare schema "OnlyGroupsOrphanDto"
 
   Scenario: A DTO used only as a response body is not pruned and stays referenced by its response
@@ -394,32 +394,32 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
   Scenario: Cloned schema preserves the property type
     When the caller fetches the OpenAPI document
     Then the OpenAPI schema "GroupsDto" property "name" has type "string"
-    And the OpenAPI schema "GroupsDto_CreateGroup" property "name" has type "string"
-    And the OpenAPI schema "GroupsDto_UpdateGroup" property "name" has type "string"
+    And the OpenAPI schema "GroupsDtoCreateGroup" property "name" has type "string"
+    And the OpenAPI schema "GroupsDtoUpdateGroup" property "name" has type "string"
 
   Scenario: Cloned schema preserves the integer property type
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" property "minInt" has type "integer"
-    And the OpenAPI schema "GroupedValidatorsDto_CreateGroup" property "minInt" property "format" equals "int32"
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" property "minInt" has type "integer"
+    And the OpenAPI schema "GroupedValidatorsDtoCreateGroup" property "minInt" property "format" equals "int32"
 
   Scenario: Cloned schema preserves UUID format
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "id" has type "string"
-    And the OpenAPI schema "GroupedRichDto_CreateGroup" property "id" property "format" equals "uuid"
+    Then the OpenAPI schema "GroupedRichDtoCreateGroup" property "id" has type "string"
+    And the OpenAPI schema "GroupedRichDtoCreateGroup" property "id" property "format" equals "uuid"
 
   Scenario: Cloned schema preserves @Schema description, title, and example
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "name" property "description" equals "Display name"
-    And the OpenAPI schema "GroupedRichDto_CreateGroup" property "name" property "title" equals "Name"
-    And the OpenAPI schema "GroupedRichDto_CreateGroup" property "name" property "example" equals "Alice"
+    Then the OpenAPI schema "GroupedRichDtoCreateGroup" property "name" property "description" equals "Display name"
+    And the OpenAPI schema "GroupedRichDtoCreateGroup" property "name" property "title" equals "Name"
+    And the OpenAPI schema "GroupedRichDtoCreateGroup" property "name" property "example" equals "Alice"
 
   Scenario: Cloned schema preserves enum values
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "status" has enum values "ACTIVE,INACTIVE"
+    Then the OpenAPI schema "GroupedRichDtoCreateGroup" property "status" has enum values "ACTIVE,INACTIVE"
 
   Scenario: Cloned schema preserves default values
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedRichDto_CreateGroup" property "status" property "default" equals "ACTIVE"
+    Then the OpenAPI schema "GroupedRichDtoCreateGroup" property "status" property "default" equals "ACTIVE"
 
   # Class-level @Validated(Group): Spring's method-validation interceptor falls back to
   # the class-level @Validated value when no parameter-level or method-level @Validated
@@ -440,8 +440,8 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Multi-media-type body schema is cloned for every declared content type
     When the caller fetches the OpenAPI document
-    Then the OpenAPI body schema for POST "/v1/testMultiMediaCreate" content type "application/json" references "GroupsDto_CreateGroup"
-    And the OpenAPI body schema for POST "/v1/testMultiMediaCreate" content type "application/xml" references "GroupsDto_CreateGroup"
+    Then the OpenAPI body schema for POST "/v1/testMultiMediaCreate" content type "application/json" references "GroupsDtoCreateGroup"
+    And the OpenAPI body schema for POST "/v1/testMultiMediaCreate" content type "application/xml" references "GroupsDtoCreateGroup"
 
   Scenario: ValidationError schema marks the non-nullable obj field as required
     When the caller fetches the OpenAPI document
@@ -471,10 +471,10 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Per-group clone keeps the maxLength when the source annotation matches the active group
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupsDto_CreateGroup" has property "name" with JSON Schema validators
+    Then the OpenAPI schema "GroupsDtoCreateGroup" has property "name" with JSON Schema validators
       | key       | value |
       | maxLength | 100   |
-    And the OpenAPI schema "GroupsDto_UpdateGroup" has property "name" with JSON Schema validators
+    And the OpenAPI schema "GroupsDtoUpdateGroup" has property "name" with JSON Schema validators
       | key       | value |
       | maxLength | 100   |
 
@@ -483,9 +483,9 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Collection-element cascade clones the inner DTO referenced via items.$ref
     When the caller fetches the OpenAPI document
-    Then the OpenAPI document declares schema "CollectionGroupsDto_CreateGroup"
-    And the OpenAPI document declares schema "InnerGroupsDto_CreateGroup"
-    And the OpenAPI schema "CollectionGroupsDto_CreateGroup" items property "items" references "InnerGroupsDto_CreateGroup"
+    Then the OpenAPI document declares schema "CollectionGroupsDtoCreateGroup"
+    And the OpenAPI document declares schema "InnerGroupsDtoCreateGroup"
+    And the OpenAPI schema "CollectionGroupsDtoCreateGroup" items property "items" references "InnerGroupsDtoCreateGroup"
 
   # Exhaustive group-scoped JSON Schema validator coverage. One field per Jakarta /
   # Hibernate annotation that produces a JSON Schema validator, every constraint scoped
@@ -494,7 +494,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @NotEmpty on string emits minLength on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "notEmptyString" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "notEmptyString" with JSON Schema validators
       | key       | value |
       | minLength | 1     |
     And the OpenAPI schema "GroupedValidatorsDto" has property "notEmptyString" without JSON Schema validators
@@ -503,7 +503,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @NotEmpty on collection emits minItems on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "notEmptyList" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "notEmptyList" with JSON Schema validators
       | key      | value |
       | minItems | 1     |
     And the OpenAPI schema "GroupedValidatorsDto" has property "notEmptyList" without JSON Schema validators
@@ -512,7 +512,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Size on string emits minLength + maxLength on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "sizeString" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "sizeString" with JSON Schema validators
       | key       | value |
       | minLength | 2     |
       | maxLength | 50    |
@@ -523,7 +523,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Size on collection emits minItems + maxItems on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "sizeList" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "sizeList" with JSON Schema validators
       | key      | value |
       | minItems | 2     |
       | maxItems | 50    |
@@ -534,7 +534,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Length emits minLength + maxLength on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "lengthString" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "lengthString" with JSON Schema validators
       | key       | value |
       | minLength | 2     |
       | maxLength | 50    |
@@ -545,7 +545,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Min emits minimum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "minInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "minInt" with JSON Schema validators
       | key     | value |
       | minimum | 5     |
     And the OpenAPI schema "GroupedValidatorsDto" has property "minInt" without JSON Schema validators
@@ -554,7 +554,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Max emits maximum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "maxInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "maxInt" with JSON Schema validators
       | key     | value |
       | maximum | 50    |
     And the OpenAPI schema "GroupedValidatorsDto" has property "maxInt" without JSON Schema validators
@@ -563,7 +563,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @DecimalMin emits minimum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "decimalMin" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "decimalMin" with JSON Schema validators
       | key     | value |
       | minimum | 5.5   |
     And the OpenAPI schema "GroupedValidatorsDto" has property "decimalMin" without JSON Schema validators
@@ -572,7 +572,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @DecimalMax emits maximum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "decimalMax" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "decimalMax" with JSON Schema validators
       | key     | value |
       | maximum | 50.5  |
     And the OpenAPI schema "GroupedValidatorsDto" has property "decimalMax" without JSON Schema validators
@@ -581,7 +581,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Range emits minimum + maximum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "rangeInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "rangeInt" with JSON Schema validators
       | key     | value |
       | minimum | 5     |
       | maximum | 50    |
@@ -592,7 +592,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Positive emits minimum + exclusiveMinimum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "positiveInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "positiveInt" with JSON Schema validators
       | key              | value |
       | minimum          | 0     |
       | exclusiveMinimum | 0     |
@@ -603,7 +603,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @PositiveOrZero emits minimum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "positiveOrZeroInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "positiveOrZeroInt" with JSON Schema validators
       | key     | value |
       | minimum | 0     |
     And the OpenAPI schema "GroupedValidatorsDto" has property "positiveOrZeroInt" without JSON Schema validators
@@ -612,7 +612,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Negative emits maximum + exclusiveMaximum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "negativeInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "negativeInt" with JSON Schema validators
       | key              | value |
       | maximum          | 0     |
       | exclusiveMaximum | 0     |
@@ -623,7 +623,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @NegativeOrZero emits maximum on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "negativeOrZeroInt" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "negativeOrZeroInt" with JSON Schema validators
       | key     | value |
       | maximum | 0     |
     And the OpenAPI schema "GroupedValidatorsDto" has property "negativeOrZeroInt" without JSON Schema validators
@@ -632,7 +632,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Pattern emits pattern on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "patternString" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "patternString" with JSON Schema validators
       | key     | value    |
       | pattern | "[A-Z]+" |
     And the OpenAPI schema "GroupedValidatorsDto" has property "patternString" without JSON Schema validators
@@ -641,7 +641,7 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
 
   Scenario: Grouped @Email emits format on the clone and nothing on the default view
     When the caller fetches the OpenAPI document
-    Then the OpenAPI schema "GroupedValidatorsDto_CreateGroup" has property "emailString" with JSON Schema validators
+    Then the OpenAPI schema "GroupedValidatorsDtoCreateGroup" has property "emailString" with JSON Schema validators
       | key    | value   |
       | format | "email" |
     And the OpenAPI schema "GroupedValidatorsDto" has property "emailString" without JSON Schema validators

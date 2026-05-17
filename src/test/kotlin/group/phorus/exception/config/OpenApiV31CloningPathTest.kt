@@ -81,14 +81,14 @@ class OpenApiV31CloningPathTest {
     }
 
     private fun assertCloneRewroteRefIn(openApi: OpenAPI, locator: (Schema<*>) -> Schema<*>?) {
-        val parentClone = openApi.components.schemas["Parent_CreateGroup"]
-            ?: error("Expected Parent_CreateGroup to be registered. Schemas: ${openApi.components.schemas.keys}")
-        assertThat(openApi.components.schemas).containsKey("Inner_CreateGroup")
+        val parentClone = openApi.components.schemas["ParentCreateGroup"]
+            ?: error("Expected ParentCreateGroup to be registered. Schemas: ${openApi.components.schemas.keys}")
+        assertThat(openApi.components.schemas).containsKey("InnerCreateGroup")
         val rewritten = locator(parentClone)
-            ?: error("Locator returned null for Parent_CreateGroup. Clone: $parentClone")
+            ?: error("Locator returned null for ParentCreateGroup. Clone: $parentClone")
         assertThat(rewritten.`$ref`)
             .`as`("Expected the inner ref to be rewritten to the per-group clone")
-            .isEqualTo("#/components/schemas/Inner_CreateGroup")
+            .isEqualTo("#/components/schemas/InnerCreateGroup")
     }
 
     @Test
@@ -233,8 +233,8 @@ class OpenApiV31CloningPathTest {
 
         config.groupedSchemaCustomizer().customise(openApi)
 
-        val clone = openApi.components.schemas["Parent_CreateGroup"]
-            ?: error("Parent_CreateGroup missing")
+        val clone = openApi.components.schemas["ParentCreateGroup"]
+            ?: error("ParentCreateGroup missing")
         val cloneNameExamples = clone.properties?.get("name")?.examples
         assertThat(cloneNameExamples).containsExactly("alice", "bob")
     }
@@ -275,8 +275,8 @@ class OpenApiV31CloningPathTest {
 
         config.groupedSchemaCustomizer().customise(openApi)
 
-        val clone = openApi.components.schemas["Parent_CreateGroup"]
-            ?: error("Parent_CreateGroup missing")
+        val clone = openApi.components.schemas["ParentCreateGroup"]
+            ?: error("ParentCreateGroup missing")
         assertThat(clone.properties?.get("kind")?.getConst()).isEqualTo("ACTIVE")
     }
 
@@ -316,8 +316,8 @@ class OpenApiV31CloningPathTest {
 
         config.groupedSchemaCustomizer().customise(openApi)
 
-        val clone = openApi.components.schemas["Parent_CreateGroup"]
-            ?: error("Parent_CreateGroup missing")
+        val clone = openApi.components.schemas["ParentCreateGroup"]
+            ?: error("ParentCreateGroup missing")
         assertThat(clone.properties?.get("name")?.`$comment`).isEqualTo("design-note: never empty")
     }
 
@@ -360,8 +360,8 @@ class OpenApiV31CloningPathTest {
 
         config.groupedSchemaCustomizer().customise(openApi)
 
-        val clone = openApi.components.schemas["Parent_CreateGroup"]
-            ?: error("Parent_CreateGroup missing")
+        val clone = openApi.components.schemas["ParentCreateGroup"]
+            ?: error("ParentCreateGroup missing")
         assertThat(clone.properties?.get("always")?.booleanSchemaValue).isTrue()
     }
 
@@ -403,8 +403,8 @@ class OpenApiV31CloningPathTest {
 
         config.groupedSchemaCustomizer().customise(openApi)
 
-        val clone = openApi.components.schemas["Parent_CreateGroup"]
-            ?: error("Parent_CreateGroup missing")
+        val clone = openApi.components.schemas["ParentCreateGroup"]
+            ?: error("ParentCreateGroup missing")
         assertThat(clone.dependentRequired).isEqualTo(mapOf("name" to listOf("email", "phone")))
     }
 
