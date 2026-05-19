@@ -1294,15 +1294,87 @@ CreateUserRequest:
 
 #### 2. Configure Orval and chain the post-processor
 
-Configure Orval to read the BE OpenAPI doc and emit a Zod schema file.
+Configure Orval to read the BE OpenAPI doc and emit a Zod schema file. An
+input `transformer` rewrites the spec before Orval sees it so the generated
+identifiers stay stable across BE changes:
+
+- **operationId rewriting**: Spring's `_N` collision suffix is stripped, and
+  any base name that still collides across controllers gets a tag suffix
+  appended (`findAll` on `user-controller` becomes `findAllUser`; on
+  `order-controller` becomes `findAllOrder`). Doing this at
+  the spec level rather than via Orval's `operationName` override matters
+  because mock handler names and `<Op>Params` / `<Op>Response` types read
+  the raw `operationId` directly; if you only rename the hook, the rest
+  drifts.
+- **reserved-word guard**: bare JS keywords (`delete`, `class`, `new`, ...)
+  get prefixed with `_` so the emitted `export const` parses.
+- **content-type rewriting**: Spring's wildcard `*/*` content-type is
+  rewritten to `application/json` so the generated types match the runtime
+  JSON payloads. Without this, Orval types every response as `Blob` /
+  `ArrayBuffer`.
 
 ```ts
 // orval.config.ts
 import { defineConfig } from 'orval';
 
+const RESERVED = new Set([
+  'delete', 'new', 'class', 'function', 'var', 'let', 'const', 'return',
+  'for', 'while', 'if', 'else', 'switch', 'case', 'break', 'continue',
+  'do', 'default', 'try', 'catch', 'finally', 'throw', 'typeof',
+  'instanceof', 'in', 'of', 'import', 'export', 'from', 'as', 'yield',
+  'async', 'await', 'this', 'super', 'void', 'null', 'true', 'false',
+  'with', 'debugger', 'enum', 'extends', 'implements', 'interface',
+  'package', 'private', 'protected', 'public', 'static',
+]);
+const reservedSafe = (n: string) => (RESERVED.has(n) ? '_' + n : n);
+const stripSpringSuffix = (id: string) => id.replace(/_\d+$/, '');
+
+function transformSpec(spec: any): any {
+  const ops: any[] = [];
+  for (const path of Object.values<any>(spec?.paths ?? {})) {
+    for (const verb of Object.values<any>(path ?? {})) {
+      if (verb && typeof verb === 'object') ops.push(verb);
+    }
+  }
+  // Count base operationIds (stripped of `_N`) so we know which collide.
+  const baseCount: Record<string, number> = {};
+  for (const verb of ops) {
+    if (!verb.operationId) continue;
+    const base = stripSpringSuffix(String(verb.operationId));
+    baseCount[base] = (baseCount[base] ?? 0) + 1;
+  }
+  for (const verb of ops) {
+    // Rewrite operationId.
+    if (verb.operationId) {
+      const base = stripSpringSuffix(String(verb.operationId));
+      const tag = Array.isArray(verb.tags) && verb.tags[0]
+        ? String(verb.tags[0]).replace(/-controller$/, '')
+        : '';
+      const suffix = baseCount[base] > 1 && tag
+        ? tag.charAt(0).toUpperCase() + tag.slice(1)
+        : '';
+      verb.operationId = reservedSafe(base) + suffix;
+    }
+    // Rewrite */* -> application/json on both request body and responses.
+    const swap = (content: Record<string, unknown> | undefined) => {
+      if (!content) return;
+      if ('*/*' in content && !('application/json' in content)) {
+        content['application/json'] = content['*/*'];
+        delete content['*/*'];
+      }
+    };
+    swap(verb.requestBody?.content);
+    for (const res of Object.values<any>(verb.responses ?? {})) swap(res?.content);
+  }
+  return spec;
+}
+
 export default defineConfig({
   api: {
-    input: { target: 'http://localhost:8080/v3/api-docs' },
+    input: {
+      target: 'http://localhost:8080/v3/api-docs',
+      override: { transformer: transformSpec },
+    },
     output: {
       target: 'src/api/generated/api.zod.ts',
       client: 'zod',
@@ -1558,63 +1630,165 @@ insert when needed.
 
 #### 3. Add the i18n templates and translator helper
 
-The templates are next-intl messages keyed by reserved code. The translator
-hook normalizes Zod's `issue.params` shape (`{minimum, maximum, pattern}`)
-and the BE's `validationErrors[].metadata` shape (`{min, max, regexp}`) onto
-the same ICU view, so one template renders cleanly from either source.
+The templates are next-intl messages keyed by reserved code under a single
+`errors.*` namespace so one table serves both client-side Zod issues
+and server-side `validationErrors[]`. The translator hook normalizes Zod's
+`issue.params` shape (`{minimum, maximum, pattern}`) and the BE's
+`validationErrors[].metadata` shape (`{min, max, regexp}`) onto the same ICU
+view so one template renders from either source.
 
 ```json
 // src/i18n/messages/en.json
 {
   "errors": {
-    "BLANK": "{field} cannot be blank.",
+    "VALIDATION_FAILED": "Some fields are invalid.",
+    "INTERNAL_SERVER_ERROR": "Something went wrong. Please try again.",
+    "BAD_REQUEST": "The request could not be understood.",
+    "UNAUTHORIZED": "You are not signed in or your session has expired.",
+    "FORBIDDEN": "You do not have permission to perform this action.",
+    "NOT_FOUND": "The requested resource was not found.",
+    "CONFLICT": "This conflicts with existing data.",
+
     "REQUIRED": "{field} is required.",
+    "BLANK": "{field} cannot be blank.",
+    "MUST_BE_NULL": "{field} must be empty.",
     "TOO_SHORT": "{field} must be at least {min} characters.",
     "TOO_LONG": "{field} must be at most {max} characters.",
     "TOO_SMALL": "{field} must be at least {min}.",
     "TOO_LARGE": "{field} must be at most {max}.",
-    "INVALID_FORMAT": "{field} format is invalid.",
-    "INVALID_EMAIL": "{field} must be a valid email address.",
     "MUST_BE_POSITIVE": "{field} must be greater than zero.",
-    "MUST_BE_PAST": "{field} must be a past date."
+    "MUST_BE_NEGATIVE": "{field} must be less than zero.",
+    "INVALID_FORMAT": "{field} has an invalid format.",
+    "INVALID_EMAIL": "{field} must be a valid email address.",
+    "MUST_BE_PAST": "{field} must be a past date.",
+    "MUST_BE_FUTURE": "{field} must be a future date.",
+    "MUST_BE_TRUE": "{field} must be checked.",
+    "MUST_BE_FALSE": "{field} must be unchecked."
   }
 }
 ```
 
+The translator exposes three callables:
+
+- `resolveTopLevel(input)`: localized message for the api error's top-level
+  `code`. Reads ICU placeholders from `err.metadata` so domain-specific
+  codes (e.g. `RATE_LIMITED` with `metadata: { retryAfterSeconds }`)
+  interpolate the same way as the reserved validation codes. Falls back to
+  `err.detail` and then `null` when nothing matched.
+- `resolveTopLevelOrGeneric(input)`: same, but on miss falls back to the
+  generic `INTERNAL_SERVER_ERROR` template.
+- `translateFieldError(code, errorOrParams?, label?)`: render a reserved
+  code with ICU params interpolated; the optional `label` overrides the
+  `{field}` placeholder, `errorOrParams` carries `min` / `max` / `regexp`
+  from either a Zod issue or BE metadata.
+
 <details>
-<summary>src/lib/validation-errors.ts</summary>
+<summary>src/hooks/useApiError.ts</summary>
 
 ```ts
 "use client";
+import { useCallback } from "react";
 import { useTranslations } from "next-intl";
+import type { ApiError } from "@/api/generated/model";
 
-export interface ValidationParams {
-  min?: number | string;
-  minimum?: number | string;  // Zod issue.params shape
-  max?: number | string;
-  maximum?: number | string;  // Zod issue.params shape
-  regexp?: string;
-  pattern?: string;           // Zod issue.params shape
-  [k: string]: unknown;
-}
+type ApiErrorLike =
+  | ApiError
+  | { response?: { data?: ApiError } }
+  | null
+  | undefined;
 
-function normalise(field: string, params?: ValidationParams) {
-  const view: Record<string, string | number> = { field };
-  if (params) {
-    view.min = (params.min ?? params.minimum) as string | number;
-    view.max = (params.max ?? params.maximum) as string | number;
-    view.regexp = String(params.regexp ?? params.pattern ?? "");
+type ParamValues = Record<string, string | number>;
+type Translator = (key: string, values?: ParamValues) => string;
+
+const DEFAULT_FIELD = "This field";
+
+export function unwrap(input: ApiErrorLike): ApiError | null {
+  if (!input) return null;
+  const wrapped = (input as { response?: { data?: ApiError } }).response?.data;
+  if (wrapped) return wrapped;
+  if (["code", "status", "validationErrors", "detail"].some((k) => k in input)) {
+    return input as ApiError;
   }
-  return view;
+  return null;
 }
 
-export function useValidationTranslator() {
-  const t = useTranslations("errors");
-  return (code: string | undefined, field: string, params?: ValidationParams) => {
-    if (!code) return t("generic");
-    if (!t.has(code)) return code;
-    return t(code, normalise(field, params));
+function coerceParam(value: unknown): string | number | undefined {
+  if (typeof value === "number" || typeof value === "string") return value;
+  if (value == null) return undefined;
+  return String(value);
+}
+
+// Normalize Zod params and BE metadata onto a single {field, min, max, regexp}
+// view so one template renders from either source.
+function normaliseParams(source: Record<string, unknown> | null | undefined): ParamValues {
+  if (!source) return { field: DEFAULT_FIELD };
+  const params = (source.params as Record<string, unknown> | undefined) ?? source;
+  const min = coerceParam(params.min ?? params.minimum);
+  const max = coerceParam(params.max ?? params.maximum);
+  const regexp = params.regexp ?? params.pattern;
+  const field = typeof source.field === "string" && source.field ? source.field : DEFAULT_FIELD;
+  return {
+    field,
+    ...(min !== undefined && { min }),
+    ...(max !== undefined && { max }),
+    ...(regexp != null && { regexp: String(regexp) }),
   };
+}
+
+// Pass every metadata entry through `coerceParam` so ICU placeholders can
+// read them by their original key (`{retryAfterSeconds}`, `{count}`, ...).
+function coerceMetadata(metadata: Record<string, unknown> | null | undefined): ParamValues | undefined {
+  if (!metadata) return undefined;
+  const result: ParamValues = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    const coerced = coerceParam(value);
+    if (coerced !== undefined) result[key] = coerced;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+function tryLookup(t: Translator, path: string, values?: ParamValues): string | undefined {
+  try {
+    const result = t(path, values);
+    if (!result) return undefined;
+    if (result === path || result.endsWith(`.${path}`)) return undefined;
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+export function useApiError() {
+  const t = useTranslations("errors") as unknown as Translator;
+
+  const resolveTopLevel = useCallback(
+    (input: ApiErrorLike): string | null => {
+      const err = unwrap(input);
+      if (!err) return null;
+      const params = coerceMetadata(err.metadata as Record<string, unknown> | null | undefined);
+      return (err.code && tryLookup(t, err.code, params)) || err.detail || null;
+    },
+    [t],
+  );
+
+  const resolveTopLevelOrGeneric = useCallback(
+    (input: ApiErrorLike): string =>
+      resolveTopLevel(input)
+        ?? tryLookup(t, "INTERNAL_SERVER_ERROR")
+        ?? "Something went wrong. Please try again.",
+    [resolveTopLevel, t],
+  );
+
+  const translateFieldError = useCallback(
+    (code: string | null | undefined, errorOrParams?: Record<string, unknown> | null, label?: string): string | undefined => {
+      if (!code) return undefined;
+      const params = normaliseParams({ ...(errorOrParams ?? {}), ...(label ? { field: label } : {}) });
+      return tryLookup(t, code, params) ?? code;
+    },
+    [t],
+  );
+
+  return { resolveTopLevel, resolveTopLevelOrGeneric, translateFieldError };
 }
 ```
 
@@ -1627,22 +1801,19 @@ export function useValidationTranslator() {
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { createUserRequest } from "@/api/generated/api.zod";
-import {
-  useValidationTranslator,
-  type ValidationParams,
-} from "@/lib/validation-errors";
+import { useApiError } from "@/hooks/useApiError";
 
 type FormValues = { name: string; email: string };
 
 export function NewUserForm() {
-  const translate = useValidationTranslator();
+  const { translateFieldError } = useApiError();
   const form = useForm<FormValues>({
     resolver: zodResolver(createUserRequest),
   });
 
   // Each RHF issue has `message` (the reserved code we passed as the Zod
   // method's second argument) and the matching Zod params (minimum, maximum,
-  // pattern). Pass both to the translator and get back the localised text.
+  // pattern). Pass both to translateFieldError and get back the localised text.
   const nameIssue = form.formState.errors.name;
   const emailIssue = form.formState.errors.email;
 
@@ -1658,11 +1829,7 @@ export function NewUserForm() {
       </label>
       {nameIssue && (
         <span role="alert">
-          {translate(
-            nameIssue.message,
-            "Name",
-            nameIssue as unknown as ValidationParams,
-          )}
+          {translateFieldError(nameIssue.message, nameIssue, "Name")}
         </span>
       )}
 
@@ -1672,11 +1839,7 @@ export function NewUserForm() {
       </label>
       {emailIssue && (
         <span role="alert">
-          {translate(
-            emailIssue.message,
-            "Email",
-            emailIssue as unknown as ValidationParams,
-          )}
+          {translateFieldError(emailIssue.message, emailIssue, "Email")}
         </span>
       )}
 
@@ -1694,9 +1857,9 @@ What happens when the user types `"x"` into Name and tabs out:
 2. Zod fires `.min(2, "TOO_SHORT")` on the `name` field.
 3. RHF stores the issue at `form.formState.errors.name` with
    `message: "TOO_SHORT"` and `minimum: 2`, `type: "string"`.
-4. The render code calls `translate("TOO_SHORT", "Name", nameIssue)`.
-5. The translator looks up `errors.TOO_SHORT` in `en.json`, gets the template
-   `"{field} must be at least {min} characters."`.
+4. The render code calls `translateFieldError("TOO_SHORT", nameIssue, "Name")`.
+5. The translator looks up `errors.TOO_SHORT` in `en.json`, gets the
+   template `"{field} must be at least {min} characters."`.
 6. It normalizes the params (Zod's `minimum` becomes `view.min`) and
    interpolates `{field}` and `{min}`.
 7. The `<span>` renders:
@@ -1725,15 +1888,12 @@ constraint via Jakarta and returns:
 
 The `save` function from Step 4 is where this happens. Replace its empty
 placeholder body with a real fetch, iterate `validationErrors[]` from the
-response, call the same translator with each entry's `metadata` (instead of
-Zod's `issue.params`), and feed the result back into RHF via
-`form.setError`. RHF stores it on the same `form.formState.errors[field]`
-slot the Step 4 `<span>` already reads from, so the BE-derived message
-surfaces through the existing render path with no extra wiring.
+response, and feed the result back into RHF via `form.setError`. RHF stores
+it on the same `form.formState.errors[field]` slot the Step 4 `<span>`
+already reads from, so the BE-derived message surfaces through the existing
+render path with no extra wiring.
 
 ```ts
-import { extractValidationErrors } from "@/lib/api-error";
-
 const labels: Record<keyof FormValues, string> = { name: "Name", email: "Email" };
 
 // This would be the same `save` passed to `form.handleSubmit(save)` in Step 4.
@@ -1744,29 +1904,94 @@ async function save(values: FormValues) {
     body: JSON.stringify(values),
   });
   if (res.ok) return;
-  for (const entry of extractValidationErrors(await res.json())) {
+  const apiError = (await res.json()) as ApiError;
+  for (const entry of apiError.validationErrors ?? []) {
+    if (!entry.field || !entry.code) continue;
     const field = entry.field as keyof FormValues;
     form.setError(field, {
-      message: translate(entry.code, labels[field], entry.metadata),
+      type: "server",
+      message: translateFieldError(entry.code, entry.metadata, labels[field]),
     });
   }
 }
 ```
 
-The translator looks up `errors.TOO_SHORT` again, normalises `metadata.min`
-into `view.min`, RHF surfaces the message on the same `nameIssue` slot, and
-the user sees the **same** text as the FE-side path:
+The translator looks up `errors.TOO_SHORT` again, normalises
+`metadata.min` into `view.min`, RHF surfaces the message on the same
+`nameIssue` slot, and the user sees the **same** text as the FE-side path:
 
 > Name must be at least 2 characters.
 
 One vocabulary, one i18n table, two sources of failure, and an identical render.
 
-#### 6. Without i18n, drop next-intl and use a static helper
+#### 6. Top-level error codes with metadata + ICU select
+
+Field-level codes carry params shared with Zod (`min`, `max`, `regexp`).
+The same metadata pipe works for the top-level `code` on the `ApiError`
+itself: any keys the BE attaches to `metadata` become ICU placeholders the
+`errors.<CODE>` template can interpolate.
+
+On the BE, pass `metadata` to the exception constructor (the `metadata`
+parameter is part of the `BaseException` contract and surfaces under
+`ApiError.metadata` in the JSON response):
+
+```kotlin
+throw TooManyRequests(
+    "Too many requests. Retry in $retryAfterSeconds seconds.",
+    code = "RATE_LIMITED",
+    metadata = mapOf("retryAfterSeconds" to retryAfterSeconds),
+)
+```
+
+On the FE, the en.json template uses the same key names:
+
+```json
+"RATE_LIMITED": "Too many requests. Please try again in {retryAfterSeconds} seconds."
+```
+
+`useApiError().resolveTopLevel(err)` reads `err.metadata`, coerces every
+value to a string or number, and passes them all to the translator. The
+rendered toast says "Too many requests. Please try again in 30 seconds."
+without per-code wiring on the FE.
+
+For cases where one error type covers several verbs (a permission check
+across many actions, a rate limit across many endpoints, etc.), one option
+is to keep distinct codes per case; another is to collapse them under a
+single code and branch the template with ICU `select` on a metadata key:
+
+```kotlin
+throw Forbidden(
+    "User is not allowed to perform this action.",
+    code = "PERMISSION_DENIED",
+    metadata = mapOf("action" to "delete", "resource" to "post"),
+)
+```
+
+```json
+"PERMISSION_DENIED": "You don't have permission to {action, select, read {view this {resource}} write {edit this {resource}} delete {delete this {resource}} share {share this {resource}} other {perform this action}}."
+```
+
+ICU `{name, select, kw1 {body1} kw2 {body2} other {fallback}}` is the
+standard MessageFormat branching syntax: outer chooses a body by the value
+of `name`; the body is itself a template that can interpolate other
+placeholders (here `{resource}`). next-intl handles this natively. No extra
+hook code is needed; `resolveTopLevel` already forwards the full `metadata`
+object to the translator.
+
+Whether to collapse codes or keep them distinct is a judgment call. Distinct
+codes give better telemetry granularity (per-error-type dashboards in
+Sentry/Datadog or similar); collapsing trades that for fewer en.json entries
+and a single structured `metadata.action` value the FE can branch on
+without parsing identifiers.
+
+#### 7. Without i18n, drop next-intl and use a static helper
 
 In case your project does not use `next-intl`, the translator collapses into a
 plain TypeScript module with the templates baked in. The shape of the call
-site is identical, callers swap `useValidationTranslator()` for
-`translateValidation` and the rest of the form code is unchanged.
+site is identical, callers swap `useApiError().translateFieldError` for
+`translateFieldError` (the exported function) and the rest of the form code
+is unchanged. ICU `select` branching for top-level codes also goes away;
+collapse those into per-action codes if you skip the i18n layer.
 
 ```ts
 // src/lib/validation-errors.ts
@@ -1823,26 +2048,26 @@ function interpolate(template: string, view: Record<string, string | number>): s
   });
 }
 
-export function translateValidation(
+export function translateFieldError(
   code: string | undefined,
-  field: string,
-  params?: ValidationParams,
+  errorOrParams?: ValidationParams,
+  label?: string,
 ): string {
   if (!code) return STATIC_EN.VALIDATION_FAILED;
   const template = STATIC_EN[code];
   if (!template) return code;
-  return interpolate(template, normalise(field, params));
+  return interpolate(template, normalise(label ?? "This field", errorOrParams));
 }
 ```
 
 The form uses it the same way.
 
 ```tsx
-import { translateValidation } from "@/lib/validation-errors";
+import { translateFieldError } from "@/lib/validation-errors";
 // ...
 {nameIssue && (
   <span role="alert">
-    {translateValidation(nameIssue.message, "Name", nameIssue as never)}
+    {translateFieldError(nameIssue.message, nameIssue as never, "Name")}
   </span>
 )}
 ```
@@ -1850,7 +2075,7 @@ import { translateValidation } from "@/lib/validation-errors";
 Same call shape as the i18n version, same input arguments, same output text.
 The only thing that changes is whether `STATIC_EN` lives in the module or
 gets pulled from a JSON file by `useTranslations`. Adding a second locale
-later means swapping `translateValidation` back to a hook that reads from
+later means swapping `translateFieldError` back to a hook that reads from
 `next-intl`.
 
 ## Building and contributing
