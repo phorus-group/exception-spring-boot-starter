@@ -16,9 +16,10 @@ plugins {
     jacoco
 }
 
-ext["jackson-2-bom.version"] = "2.21.1"
-ext["jackson-bom.version"] = "3.1.0"
-ext["netty.version"] = "4.2.13.Final"
+ext["jackson-2-bom.version"] = "2.21.5"
+ext["jackson-bom.version"] = "3.1.5"
+ext["logback.version"] = "1.5.34"
+ext["netty.version"] = "4.2.16.Final"
 ext["spring-framework.version"] = "7.0.7"
 
 configurations.all {
