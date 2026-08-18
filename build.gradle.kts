@@ -22,7 +22,7 @@ ext["jsoup.version"] = "1.23.1"
 ext["log4j2.version"] = "2.25.5"
 ext["logback.version"] = "1.5.34"
 ext["micrometer.version"] = "1.16.6"
-ext["netty.version"] = "4.2.16.Final"
+ext["netty.version"] = "4.2.17.Final"
 ext["spring-framework.version"] = "7.0.8"
 
 configurations.all {
