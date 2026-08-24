@@ -4,6 +4,7 @@ import group.phorus.exception.handlers.ApiError
 import group.phorus.exception.handlers.ValidationError
 import io.swagger.v3.core.converter.ModelConverters
 import io.swagger.v3.core.util.Json
+import io.swagger.v3.oas.models.Components
 import io.swagger.v3.oas.models.OpenAPI
 import io.swagger.v3.oas.models.Operation
 import io.swagger.v3.oas.models.PathItem
@@ -22,11 +23,17 @@ import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.properties.EnableConfigurationProperties
+import org.springframework.core.MethodParameter
 import org.springframework.context.annotation.Bean
 import org.springframework.validation.annotation.Validated
+import org.springframework.web.bind.annotation.ModelAttribute
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestPart
 import org.springframework.web.method.HandlerMethod
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.reflect.KClass
 import io.swagger.v3.oas.models.parameters.RequestBody as OasRequestBody
 
 private const val API_ERROR_SCHEMA_NAME = "ApiError"
@@ -44,7 +51,17 @@ private const val X_VALIDATIONS_ENTRY_VALUE = "value"
 private const val JAKARTA_PKG = "jakarta.validation.constraints"
 private const val HIBERNATE_PKG = "org.hibernate.validator.constraints"
 
-private val PRESENCE_RULES = setOf("notBlank", "required", "minLength", "minItems")
+/**
+ * Rules that always imply the property must be present.
+ *
+ * A lower bound alone does not: Jakarta treats `null` as valid for `@Size` / `@Length`, so
+ * `@Size(min = 2)` on a nullable field constrains the value without requiring it. `@NotEmpty`
+ * emits the same rule name and does imply presence, and the two are told apart by the code the
+ * emitter attaches, `REQUIRED` versus `TOO_SHORT`.
+ */
+private val PRESENCE_RULES = setOf("notBlank", "required")
+private val LOWER_BOUND_RULES = setOf("minLength", "minItems", "minProperties")
+private const val REQUIRED_CODE = "REQUIRED"
 
 /**
  * Type of single `x-validations` array entry as it lives in the OpenAPI schema. Keys
@@ -197,10 +214,7 @@ class OpenApiAutoConfiguration {
     )
     fun groupAwareOperationCustomizer(): OperationCustomizer =
         OperationCustomizer { operation, handlerMethod ->
-            val groups = handlerMethod.requestBodyValidationGroups() ?: return@OperationCustomizer operation
-            if (groups.isNotEmpty()) {
-                operationGroupBindings += OperationGroupBinding(operation, groups.toSortedSet().toList())
-            }
+            handlerMethod.resolveGroupBinding(operation)?.let { operationGroupBindings += it }
             operation
         }
 
@@ -217,24 +231,40 @@ class OpenApiAutoConfiguration {
     )
     fun groupedSchemaCustomizer(): OpenApiCustomizer =
         OpenApiCustomizer { openApi ->
-            val derivedComponentNames = applyGroupedSchemaRewrites(openApi)
+            val pinnedParameters = Collections.newSetFromMap(IdentityHashMap<Parameter, Boolean>())
+            val derivedComponentNames = applyGroupedSchemaRewrites(openApi, pinnedParameters)
             filterOriginalsToDefaultGroupView(openApi, derivedComponentNames)
+            filterParametersToDefaultGroupView(openApi, pinnedParameters)
             pruneUnreferencedComponents(openApi)
             stripInternalGroupsFromAllSchemas(openApi)
         }
 
     private fun Schema<*>.applyValidationsFrom(annotations: List<Annotation>?) {
         if (annotations.isNullOrEmpty()) return
+        val candidates = mutableListOf<ValidationEntry>()
         val entries = mutableListOf<ValidationEntry>()
-        val seenRules = mutableSetOf<String>()
 
         for (annotation in annotations) {
             val canonical = annotation.annotationClass.java.canonicalName ?: continue
             applyJsonSchemaFor(canonical, annotation)
-            entriesFor(canonical, annotation, this).forEach { entry ->
+            candidates += entriesFor(canonical, annotation, this)
+        }
+
+        // Two annotations can map to the same rule, `@PositiveOrZero` and `@Min(0)` both
+        // emitting `minimum`, and only one entry per rule is published. Choosing by
+        // annotation order makes the published code depend on reflection order, which is not
+        // stable across builds, so the winner is chosen by code instead.
+        val seenRules = mutableSetOf<String>()
+        candidates
+            .sortedWith(
+                compareBy(
+                    { it[X_VALIDATIONS_ENTRY_RULE] as? String ?: "" },
+                    { it[X_VALIDATIONS_ENTRY_CODE] as? String ?: "" },
+                ),
+            )
+            .forEach { entry ->
                 if (seenRules.add(entry[X_VALIDATIONS_ENTRY_RULE] as String)) entries += entry
             }
-        }
 
         if (entries.isNotEmpty()) {
             addExtension(X_VALIDATIONS_EXTENSION, entries)
@@ -372,7 +402,7 @@ class OpenApiAutoConfiguration {
     private fun Annotation.simpleGroupNames(): List<String> = try {
         @Suppress("UNCHECKED_CAST")
         val raw = annotationClass.java.getMethod("groups").invoke(this) as? Array<Class<*>>
-        raw?.map { it.simpleName ?: it.name }.orEmpty()
+        raw?.map { it.name }.orEmpty()
     } catch (_: NoSuchMethodException) {
         emptyList()
     }
@@ -398,36 +428,95 @@ class OpenApiAutoConfiguration {
             null
         }
 
-    private data class OperationGroupBinding(val operation: Operation, val groups: List<String>)
+    /**
+     * A validation group pin as the schema rewriter needs it: [activeGroups] holds the fully
+     * qualified names the constraint entries are matched against, including the super-groups
+     * JSR 380 §3.4 runs alongside a pinned sub-group, while [name] holds the simple-name
+     * suffix appended to the component name.
+     */
+    private data class GroupPin(val name: String, val activeGroups: Set<String>)
 
     /**
-     * Resolves the validation groups pinned for an operation's `@RequestBody` parameter.
-     *
-     * Returns:
-     *  - `null` when the operation has no `@RequestBody` parameter (nothing to clone).
-     *  - empty list when the operation has a body but no `@Validated` pin anywhere (default group).
-     *  - non-empty list of simple group class names when `@Validated(Group::class)` is found on
-     *    the parameter, the controller method, or the controller class. Spring's
-     *    `MethodValidationInterceptor` falls back from parameter to method to class when
-     *    resolving the active group, so the OpenAPI emission walks the same chain.
+     * The group pins an operation declares, resolved per payload parameter. A multipart
+     * operation declares one part per parameter and each part carries its own pin, so a pin
+     * on one part must not reach a sibling.
      */
-    private fun HandlerMethod.requestBodyValidationGroups(): List<String>? {
-        for (parameter in methodParameters) {
-            if (parameter.hasParameterAnnotation(RequestBody::class.java)) {
-                val paramValidated = parameter.getParameterAnnotation(Validated::class.java)
-                if (paramValidated != null) return paramValidated.value.toGroupNames()
-                val methodValidated = method.getAnnotation(Validated::class.java)
-                if (methodValidated != null) return methodValidated.value.toGroupNames()
-                val classValidated = beanType.getAnnotation(Validated::class.java)
-                if (classValidated != null) return classValidated.value.toGroupNames()
-                return emptyList()
-            }
-        }
+    private data class OperationGroupBinding(
+        val operation: Operation,
+        val bodyPin: GroupPin?,
+        val partPins: Map<String, GroupPin>,
+        val parameterPins: Map<String, GroupPin>,
+    )
+
+    /**
+     * Resolves the validation group pinned for each of an operation's payload parameters.
+     *
+     * `@RequestBody`, `@RequestPart` and `@ModelAttribute` all carry a payload Spring
+     * validates, and WebFlux resolves the active group per argument, so each parameter is
+     * resolved on its own rather than one pin deciding for the whole operation. A parameter
+     * with no `@Validated` of its own falls back to the method then the class, matching how
+     * Spring resolves the active group at runtime.
+     *
+     * Returns `null` when the operation has no payload parameter at all.
+     */
+    private fun HandlerMethod.resolveGroupBinding(operation: Operation): OperationGroupBinding? {
+        val bodyParameter = methodParameters.firstOrNull { it.hasParameterAnnotation(RequestBody::class.java) }
+        val partParameters = methodParameters.filter { it.hasParameterAnnotation(RequestPart::class.java) }
+        val modelParameters = methodParameters.filter { it.hasParameterAnnotation(ModelAttribute::class.java) }
+        if (bodyParameter == null && partParameters.isEmpty() && modelParameters.isEmpty()) return null
+
+        val partPins = partParameters.mapNotNull { parameter ->
+            val pin = pinFor(parameter) ?: return@mapNotNull null
+            payloadName(parameter, parameter.getParameterAnnotation(RequestPart::class.java)?.value) to pin
+        }.toMap()
+
+        val parameterPins = modelParameters.mapNotNull { parameter ->
+            val pin = pinFor(parameter) ?: return@mapNotNull null
+            payloadName(parameter, parameter.getParameterAnnotation(ModelAttribute::class.java)?.value) to pin
+        }.toMap()
+
+        val bodyPin = bodyParameter?.let { pinFor(it) }
+        if (bodyPin == null && partPins.isEmpty() && parameterPins.isEmpty()) return null
+        return OperationGroupBinding(operation, bodyPin, partPins, parameterPins)
+    }
+
+    private fun HandlerMethod.pinFor(parameter: MethodParameter): GroupPin? {
+        parameter.getParameterAnnotation(Validated::class.java)?.let { return it.value.toGroupPin() }
+        method.getAnnotation(Validated::class.java)?.let { return it.value.toGroupPin() }
+        beanType.getAnnotation(Validated::class.java)?.let { return it.value.toGroupPin() }
         return null
     }
 
-    private fun Array<kotlin.reflect.KClass<*>>.toGroupNames(): List<String> =
-        map { it.simpleName ?: it.qualifiedName ?: it.toString() }
+    private fun payloadName(parameter: MethodParameter, declared: String?): String =
+        declared?.takeIf { it.isNotBlank() } ?: parameter.parameterName ?: parameter.parameterIndex.toString()
+
+    /**
+     * Identity of a validation group is the class, so constraints are matched by fully
+     * qualified name and two groups sharing a simple name in different packages stay
+     * distinct. A group's super-interfaces are matched too, since validating a group runs
+     * the constraints of the groups it extends.
+     *
+     * The name suffix keeps the simple names, sorted so the same pin always produces the
+     * same component name.
+     */
+    private fun Array<KClass<*>>.toGroupPin(): GroupPin? {
+        val declared = map { it.java }.takeIf { it.isNotEmpty() } ?: return null
+        val name = declared.map { it.groupSimpleName() }.sorted().joinToString("")
+        val active = declared.flatMap { listOf(it.name) + it.allSuperInterfaceNames() }.toSet()
+        return GroupPin(name, active)
+    }
+
+    private fun Class<*>.allSuperInterfaceNames(): List<String> {
+        val out = mutableListOf<String>()
+        val queue = ArrayDeque(interfaces.toList())
+        while (queue.isNotEmpty()) {
+            val next = queue.removeFirst()
+            if (out.add(next.name)) queue.addAll(next.interfaces.toList())
+        }
+        return out
+    }
+
+    private fun Class<*>.groupSimpleName(): String = simpleName ?: name.substringAfterLast('.')
 
     /**
      * For each operation whose request body is pinned to one or more validation groups,
@@ -436,27 +525,69 @@ class OpenApiAutoConfiguration {
      * rewrites the operation's request body `$ref` to point at the clone. Runs in the
      * post-build phase so the original component is already registered in `components.schemas`.
      */
-    private fun applyGroupedSchemaRewrites(openApi: OpenAPI): Set<String> {
+    private fun applyGroupedSchemaRewrites(
+        openApi: OpenAPI,
+        pinnedParameters: MutableSet<Parameter>,
+    ): Set<String> {
         val components = openApi.components ?: return emptySet()
-        // Cache `(componentName, groupSet) -> derivedName` across the whole pass so two
+        // Cache `(componentName, pin) -> derivedName` across the whole pass so two
         // operations pinned to the same group set share the same clone, and so a recursive
         // walk can't enter an infinite loop on self-referential DTOs.
-        val derivedNames: MutableMap<Pair<String, List<String>>, String> = mutableMapOf()
+        val derivedNames: MutableMap<Pair<String, GroupPin>, String> = mutableMapOf()
         val needsCloneCache: MutableMap<String, Boolean> = mutableMapOf()
 
         operationGroupBindings.forEach { binding ->
-            val mediaTypes = binding.operation.requestBody?.content?.values ?: return@forEach
-            mediaTypes.forEach { mediaType ->
+            binding.operation.requestBody?.content?.forEach { (contentType, mediaType) ->
                 val schemaNode = mediaType.schema ?: return@forEach
-                val originalRef = schemaNode.`$ref` ?: return@forEach
-                val componentName = originalRef.removePrefix(SCHEMA_REF_PREFIX)
-                val derivedName = ensureGroupClone(components, componentName, binding.groups, derivedNames, needsCloneCache)
-                    ?: return@forEach
-                // Replace the schema on the mediaType with a fresh `$ref` holder. springdoc
-                // reuses the same Schema instance across operations that take the same DTO
-                // with the same parameter-level annotation set; mutating its `$ref` in place
-                // would leak the rewrite into sibling operations.
-                mediaType.schema = Schema<Any>().`$ref`("$SCHEMA_REF_PREFIX$derivedName")
+                if (contentType.startsWith("multipart/")) {
+                    // A multipart body is an inline object springdoc builds with one property
+                    // per declared part, so the component refs sit on the properties and each
+                    // one carries its own part's pin. Binary parts have no ref and are skipped.
+                    schemaNode.properties?.forEach { (partName, partSchema) ->
+                        val pin = binding.partPins[partName] ?: return@forEach
+                        val partRef = partSchema?.`$ref` ?: return@forEach
+                        val derivedName = ensureGroupClone(
+                            components, partRef.removePrefix(SCHEMA_REF_PREFIX), pin, derivedNames, needsCloneCache,
+                        ) ?: return@forEach
+                        schemaNode.properties[partName] = Schema<Any>().`$ref`("$SCHEMA_REF_PREFIX$derivedName")
+                    }
+                    return@forEach
+                }
+
+                val pin = binding.bodyPin ?: return@forEach
+                val originalRef = schemaNode.`$ref`
+                if (originalRef != null) {
+                    val derivedName = ensureGroupClone(
+                        components, originalRef.removePrefix(SCHEMA_REF_PREFIX), pin, derivedNames, needsCloneCache,
+                    ) ?: return@forEach
+                    // Replace the schema on the mediaType with a fresh `$ref` holder. springdoc
+                    // reuses the same Schema instance across operations that take the same DTO
+                    // with the same parameter-level annotation set; mutating its `$ref` in place
+                    // would leak the rewrite into sibling operations.
+                    mediaType.schema = Schema<Any>().`$ref`("$SCHEMA_REF_PREFIX$derivedName")
+                    return@forEach
+                }
+
+                // A container body (`List<Dto>`, `Map<String, Dto>`) carries no ref of its own,
+                // the element ref sits below the root. Clone the node first so the rewrite does
+                // not reach a schema instance springdoc shares with another operation.
+                val container = schemaNode.deepCloneViaJson() ?: return@forEach
+                rewriteNestedRefsForGroups(container, components, pin, derivedNames, needsCloneCache)
+                mediaType.schema = container
+            }
+
+            binding.operation.parameters?.forEach { parameter ->
+                val pin = binding.parameterPins[parameter.name] ?: return@forEach
+                pinnedParameters += parameter
+                val ref = parameter.schema?.`$ref`
+                if (ref == null) {
+                    parameter.schema?.let { scopeParameterSchemaToActiveGroups(it, pin.activeGroups) }
+                    return@forEach
+                }
+                val derivedName = ensureGroupClone(
+                    components, ref.removePrefix(SCHEMA_REF_PREFIX), pin, derivedNames, needsCloneCache,
+                ) ?: return@forEach
+                parameter.schema = Schema<Any>().`$ref`("$SCHEMA_REF_PREFIX$derivedName")
             }
         }
         return derivedNames.values.toSet()
@@ -479,6 +610,34 @@ class OpenApiAutoConfiguration {
                 scopeSchemaToActiveGroups(schema, emptySet())
             }
         }
+    }
+
+    /**
+     * Filters every parameter that no `@Validated` pins to its `Default`-group view. A
+     * parameter constraint carrying an explicit `groups()` is not part of `Default`, so an
+     * operation that does not pin that group must not publish it. Parameters the rewrite
+     * pass already scoped to their own pin are left alone.
+     */
+    private fun filterParametersToDefaultGroupView(openApi: OpenAPI, pinnedParameters: Set<Parameter>) {
+        openApi.paths?.values?.forEach { pathItem ->
+            pathItem.readOperations().forEach { operation ->
+                operation.parameters?.forEach { parameter ->
+                    if (parameter in pinnedParameters) return@forEach
+                    val schema = parameter.schema ?: return@forEach
+                    if (schema.`$ref` != null) return@forEach
+                    scopeParameterSchemaToActiveGroups(schema, emptySet())
+                }
+            }
+        }
+    }
+
+    /**
+     * Scopes a parameter's own constraints, which sit on the parameter schema itself rather
+     * than under `properties` the way a body DTO's do.
+     */
+    private fun scopeParameterSchemaToActiveGroups(schema: Schema<*>, activeGroups: Set<String>) {
+        val kept = schema.filterValidationsForActiveGroups(activeGroups)
+        applyJsonSchemaFromEntries(schema, kept)
     }
 
     /**
@@ -608,31 +767,53 @@ class OpenApiAutoConfiguration {
      * so the nested clones share the same active group set as their parent.
      */
     private fun ensureGroupClone(
-        components: io.swagger.v3.oas.models.Components,
+        components: Components,
         componentName: String,
-        groups: List<String>,
-        derivedNames: MutableMap<Pair<String, List<String>>, String>,
+        pin: GroupPin,
+        derivedNames: MutableMap<Pair<String, GroupPin>, String>,
         needsCloneCache: MutableMap<String, Boolean>,
     ): String? {
-        val cacheKey = componentName to groups
+        val cacheKey = componentName to pin
         derivedNames[cacheKey]?.let { return it }
 
         val original = components.schemas?.get(componentName) ?: return null
-        // Derived names concatenate component name + group names with no separator so the
-        // result is a single PascalCase identifier (e.g. `OrganizationRequestCreate`).
-        // OpenAPI tools such as Orval treat underscored component names like
-        // `OrganizationRequest_Create` as unresolvable refs and fall back to `zod.unknown()`.
-        val derivedName = "${componentName}${groups.joinToString("")}"
+        val derivedName = availableDerivedName(components, componentName, pin, derivedNames.values.toSet())
         // Reserve the name BEFORE recursing so a cycle (DTO referencing itself) terminates
         // by hitting this cache entry instead of looping.
         derivedNames[cacheKey] = derivedName
 
         val clone = original.deepCloneViaJson() ?: return null
-        scopeSchemaToActiveGroups(clone, groups.toSet())
-        rewriteNestedRefsForGroups(clone, components, groups, derivedNames, needsCloneCache)
+        scopeSchemaToActiveGroups(clone, pin.activeGroups)
+        rewriteNestedRefsForGroups(clone, components, pin, derivedNames, needsCloneCache)
 
         components.addSchemas(derivedName, clone)
         return derivedName
+    }
+
+    /**
+     * Picks the component name for a clone. Derived names concatenate component name and
+     * group names with no separator so the result is a single PascalCase identifier
+     * (`OrganizationRequestCreate`); OpenAPI tools such as Orval treat underscored names like
+     * `OrganizationRequest_Create` as unresolvable refs and fall back to `zod.unknown()`.
+     *
+     * A consumer is free to declare a DTO whose own name is exactly what the concatenation
+     * produces, so a name already taken by something that is not one of this pass's clones
+     * gets a numeric suffix rather than overwriting it.
+     */
+    private fun availableDerivedName(
+        components: Components,
+        componentName: String,
+        pin: GroupPin,
+        alreadyDerived: Set<String>,
+    ): String {
+        val base = "$componentName${pin.name}"
+        if (components.schemas?.containsKey(base) != true || base in alreadyDerived) return base
+        var suffix = 2
+        while (true) {
+            val candidate = "$base$suffix"
+            if (components.schemas?.containsKey(candidate) != true && candidate !in alreadyDerived) return candidate
+            suffix++
+        }
     }
 
     /**
@@ -646,16 +827,16 @@ class OpenApiAutoConfiguration {
      */
     private fun rewriteNestedRefsForGroups(
         schema: Schema<*>,
-        components: io.swagger.v3.oas.models.Components,
-        groups: List<String>,
-        derivedNames: MutableMap<Pair<String, List<String>>, String>,
+        components: Components,
+        pin: GroupPin,
+        derivedNames: MutableMap<Pair<String, GroupPin>, String>,
         needsCloneCache: MutableMap<String, Boolean>,
     ) {
         walkSubSchemas(schema) { sub ->
             val ref = sub.`$ref` ?: return@walkSubSchemas
             val innerName = ref.removePrefix(SCHEMA_REF_PREFIX)
             if (!componentNeedsGroupClone(components, innerName, needsCloneCache)) return@walkSubSchemas
-            val innerDerived = ensureGroupClone(components, innerName, groups, derivedNames, needsCloneCache)
+            val innerDerived = ensureGroupClone(components, innerName, pin, derivedNames, needsCloneCache)
                 ?: return@walkSubSchemas
             sub.`$ref` = "$SCHEMA_REF_PREFIX$innerDerived"
         }
@@ -699,7 +880,7 @@ class OpenApiAutoConfiguration {
      * O(n) over the schema graph; cycles are broken via a per-call visited set.
      */
     private fun componentNeedsGroupClone(
-        components: io.swagger.v3.oas.models.Components,
+        components: Components,
         componentName: String,
         cache: MutableMap<String, Boolean>,
         visited: MutableSet<String> = mutableSetOf(),
@@ -736,18 +917,31 @@ class OpenApiAutoConfiguration {
         val existingRequired = schema.required?.toSet().orEmpty()
         val newRequired = mutableListOf<String>()
         schema.properties?.forEach { (propName, propSchema) ->
-            val hadAnyXValidations =
-                (propSchema.extensions?.get(X_VALIDATIONS_EXTENSION) as? List<*>)?.isNotEmpty() == true
+            @Suppress("UNCHECKED_CAST")
+            val allEntries =
+                (propSchema.extensions?.get(X_VALIDATIONS_EXTENSION) as? List<ValidationEntry>).orEmpty()
             val keptEntries = propSchema.filterValidationsForActiveGroups(activeGroups)
             applyJsonSchemaFromEntries(propSchema, keptEntries)
-            val derivedFromKept = keptEntries.any { it[X_VALIDATIONS_ENTRY_RULE] in PRESENCE_RULES }
             when {
-                derivedFromKept -> newRequired += propName
-                hadAnyXValidations -> Unit
+                // A surviving presence constraint requires the property.
+                keptEntries.any { it.impliesPresence() } -> newRequired += propName
+                // Presence was asserted by a constraint that this group filtered out, so the
+                // property is genuinely optional here even if springdoc derived it as required.
+                allEntries.any { it.impliesPresence() } -> Unit
+                // Otherwise presence comes from the type, not from a constraint, and stands.
                 propName in existingRequired -> newRequired += propName
             }
         }
         schema.required = newRequired.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * Whether the entry asserts the property must be present, as opposed to merely bounding it.
+     */
+    private fun ValidationEntry.impliesPresence(): Boolean {
+        val rule = this[X_VALIDATIONS_ENTRY_RULE] as? String ?: return false
+        if (rule in PRESENCE_RULES) return true
+        return rule in LOWER_BOUND_RULES && this[X_VALIDATIONS_ENTRY_CODE] == REQUIRED_CODE
     }
 
     /**

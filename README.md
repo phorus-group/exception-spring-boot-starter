@@ -150,7 +150,7 @@ the tag set and disabling.
 - **Always present `code`**: every error response carries a non-null top-level `code`. When the exception sets one explicitly it is used as-is, otherwise the reserved fallback for the HTTP status (`BAD_REQUEST`, `NOT_FOUND`, etc.) is emitted.
 - **Auto-derived per-field validation codes**: every `validationErrors[]` entry carries a `code` derived from the failing Jakarta constraint (`BLANK` for `@NotBlank`, `TOO_SHORT` or `TOO_LONG` for `@Size`, `INVALID_FORMAT` for `@Pattern`, etc.) and a `metadata` object with the constraint's public attributes (`min`, `max`, `regexp`).
 - **OpenAPI `x-validations` extension**: every property annotated with Jakarta constraints is published in `/v3/api-docs` with an `x-validations` array describing the rule and reserved code for each constraint, so SDK generators and API consumers can read the per-field validation contract at generation time. Useful for generating FE schema validators (Zod, Yup, Valibot, Joi) that catch invalid input on the client without round-tripping to the BE, and for using the reserved codes as i18n keys to render translated, client-facing error messages. See [Generating client validation from `x-validations`](#generating-client-validation-from-x-validations).
-- **OpenAPI group-scoped schemas**: when a controller pins its `@RequestBody` to a Jakarta validation group via `@Validated(Group::class)`, the operation's body schema becomes a group-specific clone whose `x-validations` and `required` cover only that group's constraints. Operations with no pinned group (`@Valid`, or `@Validated` with no value, both run the `Default` group) keep the original component, filtered to its default-group view.
+- **OpenAPI group-scoped schemas**: when a controller pins a payload to a Jakarta validation group via `@Validated(Group::class)`, that payload's schema becomes a group-specific clone whose `x-validations` and `required` cover only that group's constraints. `@RequestBody`, each multipart `@RequestPart`, and `@ModelAttribute` query objects are each pinned on their own. Payloads with no pinned group (`@Valid`, or `@Validated` with no value, both run the `Default` group) keep the original component, filtered to its default-group view, and so do parameter constraints.
 - **Two-layer handling**: `RestExceptionHandler` catches controller exceptions, `WebfluxExceptionHandler` catches filter and framework exceptions
 - **Bean validation**: supports `@Valid` on request bodies, collections, and Kotlin `suspend` functions with correct parameter names
 - **Database conflict detection**: `DataIntegrityViolationException` is caught and returned as `409 Conflict`
@@ -652,11 +652,19 @@ to the parameter's schema. Standard JSON Schema validators on parameters are sti
 springdoc natively next to the `x-validations` array.
 
 An `OperationCustomizer` runs once per operation, with both the `Operation` and the underlying
-`HandlerMethod`. It inspects the `@RequestBody` parameter (and falls back to the controller
-method itself) for an `@Validated(Group::class)` annotation, and when one is found, records an
-in-memory `(Operation, groups)` binding for phase 2. It does not mutate the spec at this point
-because springdoc reuses the same `Schema` instance across operations that take the same DTO,
-and mutating it would leak the rewrite into sibling operations.
+`HandlerMethod`. It resolves the pinned group of every payload parameter separately, `@RequestBody`,
+each `@RequestPart`, and each `@ModelAttribute`, reading `@Validated(Group::class)` from the
+parameter, then the controller method, then the controller class. WebFlux resolves the active group
+per argument, so a pin on one part must not reach a sibling part. The result is an in-memory
+binding of the operation to a pin per payload, consumed in phase 2. It does not mutate the spec at
+this point because springdoc reuses the same `Schema` instance across operations that take the same
+DTO, and mutating it would leak the rewrite into sibling operations.
+
+A pin carries two things: the fully qualified names of the pinned groups plus the groups they
+extend, used to match constraint entries, and the sorted simple names, used to build the clone's
+component name. Group identity is the class, so two groups sharing a simple name in different
+packages stay distinct, and a constraint scoped to a super-group applies to a clone pinned to a
+sub-group, matching JSR 380 §3.4 group inheritance.
 
 #### Phase 2: whole-document customizers
 
@@ -673,23 +681,35 @@ The second runs four passes in order:
    binding it deep-clones the referenced component via swagger's Jackson mapper (which understands
    the polymorphic `Schema` hierarchy), filters the clone's `x-validations` entries to those whose
    `groups` is empty (default group) or intersects with the active group set, and recomputes the
-   clone's `required` array from the kept presence rules (`notBlank`, `required`, `minLength`,
-   `minItems`). It walks every property on the clone whose schema is a `$ref` to another
+   clone's `required` array. A property is required when a kept entry asserts presence
+   (`notBlank`, `required`, or a lower bound carrying the `REQUIRED` code, which is what
+   `@NotEmpty` emits), or when it was already required for a reason no constraint supplied, such
+   as `@Schema(requiredMode = REQUIRED)`. A lower bound on its own does not make a property
+   required: Jakarta treats `null` as valid for `@Size` and `@Length`, so `@Size(min = 2)` on a
+   nullable field bounds the value without demanding it. It walks every property on the clone whose schema is a `$ref` to another
    component; if the inner carries group-scoped constraints directly or transitively, it
    recursively clones it under the same active group set and rewrites the property's `$ref` to
    point at the inner clone. This matches JSR 380 §5.4.5 group propagation through `@Valid`
    cascading. The clone gets a derived name (`OriginalNameGroupName1GroupName2`, concatenated
    with the group names sorted alphabetically for determinism, no separator so the result is a
-   single PascalCase identifier OpenAPI tooling like Orval treats as a valid component name).
+   single PascalCase identifier OpenAPI tooling like Orval treats as a valid component name). If
+   that name is already taken by a component the application declared, the clone gets a numeric
+   suffix rather than overwriting it.
    Finally, the operation's request body schema is replaced with a fresh `$ref` holder pointing
-   at the clone.
+   at the clone. Two shapes carry no `$ref` at the body root and are handled by rewriting below
+   it: a multipart body, which springdoc builds as an inline object with one property per declared
+   part, each part cloned under its own pin and binary parts left untouched; and a container body
+   such as `List<Dto>` or `Map<String, Dto>`, whose element ref is cloned in place on a copy of the
+   body schema. A pinned `@ModelAttribute` parameter is rewritten the same way as a body.
 2. Default-group view of the originals. Operations that pin no group (`@Valid`, or `@Validated`
    with no value, or no validation annotation at all) run under the `Default` group at runtime,
    and constraints with an explicit `groups()` attribute are not part of `Default`.
    The original component must match what the BE actually enforces, so every non-derived
-   component is filtered to keep only entries whose `groups()` is empty. springdoc already
-   respects `groups()` when deriving the `required` array on the original; this pass does the
-   equivalent for `x-validations`.
+   component is filtered to keep only entries whose `groups()` is empty, and so is every operation
+   parameter that no pin covers, since a group-scoped `@RequestParam` constraint is no more part of
+   `Default` than a group-scoped body constraint. springdoc already respects `groups()` when
+   deriving the `required` array on the original; this pass does the equivalent for
+   `x-validations`.
 3. Orphan pruning. After cloning and filtering, every component in `components.schemas` that no
    other place in the document points at is dropped. To decide which components are still
    pointed at, the customizer walks the whole document tree (every operation and its
@@ -711,7 +731,7 @@ flowchart TD
     A --> D[Per operation]
     B --> E["PropertyCustomizer:<br/>fills JSON Schema keys + x-validations<br/>on body fields"]
     C --> F["ParameterCustomizer:<br/>fills JSON Schema keys + x-validations<br/>on path / query / header / cookie params"]
-    D --> G["OperationCustomizer:<br/>records (operation, groups) bindings"]
+    D --> G["OperationCustomizer:<br/>records a group pin per payload parameter"]
     E --> H[Whole document built]
     F --> H
     G --> H
@@ -997,6 +1017,10 @@ name otherwise.
 | `past` / `pastOrPresent` / `future` / `futureOrPresent` | temporal constraints | synthetic |
 | `assertTrue` / `assertFalse` | `@AssertTrue`, `@AssertFalse` | synthetic |
 
+A property carrying two annotations that map to the same rule, `@PositiveOrZero` and `@Min(0)`
+both emitting `minimum`, publishes one entry for that rule, picked by the reserved code so the
+result does not depend on the order reflection hands back the annotations.
+
 Properties carrying no recognized constraint annotation emit no `x-validations` key. The
 bean is conditional on the `org.springdoc.core.customizers.OpenApiCustomizer` class being
 on the classpath, which matches the existing OpenAPI integration.
@@ -1047,17 +1071,28 @@ paths:
 ### Validation groups
 
 When an operation pins one or more Jakarta validation groups via `@Validated(Group::class)`,
-its body schema becomes a group-specific clone of the DTO component. The pin is read from the
-`@RequestBody` parameter first, then from a method-level `@Validated(Group::class)`, then from
-a class-level `@Validated(Group::class)` on the controller. This mirrors how Spring's
-`MethodValidationInterceptor` resolves the active group at runtime.
+that payload's schema becomes a group-specific clone of the DTO component. The pin is read from the
+payload parameter first, then from a method-level `@Validated(Group::class)`, then from a
+class-level `@Validated(Group::class)` on the controller. This mirrors how Spring resolves the
+active group at runtime.
+
+Every payload is pinned on its own. A multipart operation declares one parameter per part, so an
+operation can carry two object parts pinned to different groups and each gets its own clone, and a
+part left on `@Valid` beside a pinned sibling stays on the `Default` group. `@RequestBody` and
+`@ModelAttribute` query objects follow the same rule.
+
+Groups are matched by class, not by name. A constraint scoped to a group that the pinned group
+extends applies to the clone, and two groups with the same simple name in different packages are
+different groups. The clone's component name still uses the simple names.
 
 When the controller declares multiple `consumes` media types on the same method, every entry
 in `requestBody.content` is rewritten to point at the same per-group clone, so JSON and XML
 (or any other declared content type) reference the matching schema component. The clone's `x-validations` array drops constraint entries
 whose `groups()` attribute does not include any of the active groups, and the clone's
-`required` array is derived from the kept presence-rule entries (`notBlank`, `required`,
-`minLength`, `minItems`).
+`required` array is derived from the kept entries that assert presence: `notBlank`, `required`,
+and a lower bound carrying the `REQUIRED` code, which is what `@NotEmpty` emits. `@Size(min = 2)`
+and `@Length(min = 2)` emit the same lower-bound rules with a `TOO_SHORT` code and do not make the
+property required, because Jakarta accepts `null` for both.
 
 ```kotlin
 data class OrganizationRequest(
