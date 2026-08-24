@@ -54,10 +54,14 @@ class OpenApiV31CloningPathTest {
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val list = field.get(config) as MutableList<Any>
+        val pinClass = Class.forName("group.phorus.exception.config.OpenApiAutoConfiguration\$GroupPin")
+        val pinCtor = pinClass.declaredConstructors.first()
+        pinCtor.isAccessible = true
+        val pin = pinCtor.newInstance(groups.joinToString(""), groups.toSet())
         val bindingClass = Class.forName("group.phorus.exception.config.OpenApiAutoConfiguration\$OperationGroupBinding")
         val ctor = bindingClass.declaredConstructors.first()
         ctor.isAccessible = true
-        list += ctor.newInstance(operation, groups)
+        list += ctor.newInstance(operation, pin, emptyMap<String, Any>(), emptyMap<String, Any>())
         return config
     }
 

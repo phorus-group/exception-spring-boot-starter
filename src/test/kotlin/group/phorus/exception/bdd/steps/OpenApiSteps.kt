@@ -277,6 +277,51 @@ class OpenApiSteps(
             "Schema $schemaName.$propertyName.enum mismatch. Property: $property")
     }
 
+    @Then("the OpenAPI multipart body schema for POST {string} part {string} has property {string} with x-validations")
+    fun `multipart body part property has x-validations`(
+        path: String,
+        partName: String,
+        propertyName: String,
+        expected: DataTable,
+    ) {
+        val schema = readMultipartPartSchema(path, partName)
+        val property = readProperty(schema, propertyName)
+        val extension = property.get("x-validations")
+            ?: error("x-validations missing on multipart part $partName for POST $path / $propertyName")
+        assertTrue(extension.isArray, "x-validations should be an array")
+        val expectedRows = expected.asMaps().map { it["rule"] to it["code"] }.toSet()
+        val actualRows = (0 until extension.size()).map {
+            val entry = extension.get(it)
+            entry.get("rule")?.asString() to entry.get("code")?.asString()
+        }.toSet()
+        assertEquals(
+            expectedRows, actualRows,
+            "x-validations on multipart part $partName for POST $path / $propertyName mismatch",
+        )
+    }
+
+    @Then("the OpenAPI multipart body schema for POST {string} part {string} references {string}")
+    fun `multipart body part references`(path: String, partName: String, targetComponent: String) {
+        val root = readOpenApiRoot()
+        val pathNode = root.get("paths")?.get(path)
+            ?: throw IllegalStateException("Path $path not found in OpenAPI document")
+        val operation = pathNode.get("post")
+            ?: throw IllegalStateException("POST operation not found at $path")
+        val schemaNode = operation.get("requestBody")
+            ?.get("content")
+            ?.get("multipart/form-data")
+            ?.get("schema")
+            ?: throw IllegalStateException("Multipart body schema missing on POST $path")
+        val part = schemaNode.get("properties")?.get(partName)
+            ?: error("Part $partName missing on multipart body for POST $path. Schema: $schemaNode")
+        val ref = part.get("\$ref")?.asString()
+            ?: error("Part $partName on POST $path has no \$ref. Part: $part")
+        assertEquals(
+            targetComponent, ref.removePrefix("#/components/schemas/"),
+            "Multipart part $partName on POST $path \$ref mismatch",
+        )
+    }
+
     @Then("the OpenAPI body schema for POST {string} content type {string} references {string}")
     fun `body schema for content type references`(path: String, contentType: String, targetComponent: String) {
         val root = readOpenApiRoot()
@@ -380,6 +425,96 @@ class OpenApiSteps(
             ?: error("Property $propertyName on body schema for POST $path has no \$ref")
         val componentName = ref.removePrefix("#/components/schemas/")
         return readSchema(componentName)
+    }
+
+    private fun readMultipartPartSchema(path: String, partName: String): JsonNode {
+        val root = readOpenApiRoot()
+        val operation = root.get("paths")?.get(path)?.get("post")
+            ?: throw IllegalStateException("POST operation not found at $path")
+        val schemaNode = operation.get("requestBody")?.get("content")?.get("multipart/form-data")?.get("schema")
+            ?: throw IllegalStateException("Multipart body schema missing on POST $path")
+        val part = schemaNode.get("properties")?.get(partName)
+            ?: error("Part $partName missing on multipart body for POST $path")
+        val ref = part.get("\$ref")?.asString() ?: return part
+        return readSchema(ref.removePrefix("#/components/schemas/"))
+    }
+
+    @Then("every schema reference in the OpenAPI document resolves to a declared component")
+    fun `every schema reference resolves`() {
+        val root = readOpenApiRoot()
+        val dangling = mutableListOf<String>()
+
+        fun declared(ref: String): Boolean {
+            if (!ref.startsWith("#/components/")) return true
+            val parts = ref.removePrefix("#/components/").split("/")
+            if (parts.size != 2) return false
+            return root.get("components")?.get(parts[0])?.get(parts[1]) != null
+        }
+
+        fun walk(node: JsonNode) {
+            if (node.isObject) {
+                node.get("\$ref")?.asString()?.let { if (!declared(it)) dangling += it }
+                node.get("discriminator")?.get("mapping")?.let { mapping ->
+                    mapping.properties().forEach { (_, v) ->
+                        v.asString()?.let { if (!declared(it)) dangling += it }
+                    }
+                }
+                node.properties().forEach { (_, v) -> walk(v) }
+            } else if (node.isArray) {
+                node.forEach { walk(it) }
+            }
+        }
+
+        walk(root)
+        assertTrue(dangling.isEmpty(), "Unresolvable refs in the served document: ${dangling.distinct()}")
+    }
+
+    @Then("the OpenAPI body schema for POST {string} items references {string}")
+    fun `body schema items references`(path: String, targetComponent: String) {
+        val schema = readBodySchemaForPost(path)
+        val ref = schema.get("items")?.get("\$ref")?.asString()
+            ?: error("Body schema for POST $path has no items.\$ref. Schema: $schema")
+        assertEquals(targetComponent, ref.removePrefix("#/components/schemas/"),
+            "Body items \$ref mismatch for POST $path")
+    }
+
+    @Then("the OpenAPI body schema for POST {string} additionalProperties references {string}")
+    fun `body schema additionalProperties references`(path: String, targetComponent: String) {
+        val schema = readBodySchemaForPost(path)
+        val ref = schema.get("additionalProperties")?.get("\$ref")?.asString()
+            ?: error("Body schema for POST $path has no additionalProperties.\$ref. Schema: $schema")
+        assertEquals(targetComponent, ref.removePrefix("#/components/schemas/"),
+            "Body additionalProperties \$ref mismatch for POST $path")
+    }
+
+    @Then("the OpenAPI parameter {string} for POST {string} references {string}")
+    fun `parameter references component`(name: String, path: String, targetComponent: String) {
+        val root = readOpenApiRoot()
+        val params = root.get("paths")?.get(path)?.get("post")?.get("parameters")
+            ?: error("POST $path declares no parameters")
+        val param = (0 until params.size()).map { params.get(it) }
+            .firstOrNull { it.get("name")?.asString() == name }
+            ?: error("Parameter $name not found on POST $path")
+        val ref = param.get("schema")?.get("\$ref")?.asString()
+            ?: error("Parameter $name on POST $path has no schema.\$ref. Parameter: $param")
+        assertEquals(targetComponent, ref.removePrefix("#/components/schemas/"),
+            "Parameter $name \$ref mismatch on POST $path")
+    }
+
+    @Then("the OpenAPI schema {string} x-validations entries carry no internal keys")
+    fun `schema entries carry no internal keys`(schemaName: String) {
+        val schema = readSchema(schemaName)
+        val offenders = mutableListOf<String>()
+        schema.get("properties")?.properties()?.forEach { (propName, prop) ->
+            prop.get("x-validations")?.let { entries ->
+                (0 until entries.size()).forEach { i ->
+                    val entry = entries.get(i)
+                    if (entry.get("groups") != null) offenders += "$propName[$i].groups"
+                    if (entry.get("value") != null) offenders += "$propName[$i].value"
+                }
+            }
+        }
+        assertTrue(offenders.isEmpty(), "Internal keys leaked on $schemaName: $offenders")
     }
 
     private fun readBodySchemaForPost(path: String): JsonNode {

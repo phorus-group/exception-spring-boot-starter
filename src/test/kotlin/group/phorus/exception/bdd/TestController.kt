@@ -7,13 +7,17 @@ import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
 import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
+import org.springframework.http.MediaType
+import org.springframework.http.codec.multipart.FilePart
 import org.springframework.validation.annotation.Validated
 import org.springframework.web.bind.annotation.CookieValue
+import org.springframework.web.bind.annotation.ModelAttribute
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestParam
+import org.springframework.web.bind.annotation.RequestPart
 import org.springframework.web.bind.annotation.RestController
 
 @Validated
@@ -294,8 +298,8 @@ class TestController {
     @PostMapping(
         "/v1/testMultiMediaCreate",
         consumes = [
-            org.springframework.http.MediaType.APPLICATION_JSON_VALUE,
-            org.springframework.http.MediaType.APPLICATION_XML_VALUE,
+            MediaType.APPLICATION_JSON_VALUE,
+            MediaType.APPLICATION_XML_VALUE,
         ],
     )
     fun testMultiMediaCreate(
@@ -309,4 +313,159 @@ class TestController {
 
     @PostMapping("/v1/testGroupedRichValid")
     fun testGroupedRichValid(@RequestBody @Valid body: GroupedRichDto): String = "OK"
+
+    // Production shape: binary parts sit alongside the object part, and only the object part
+    // carries the group pin. A scan that stops at the first part parameter never sees it.
+    @PostMapping(
+        "/v1/testMultipartCreate",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartCreate(
+        @RequestPart("file") file: FilePart,
+        @RequestPart("data") @Validated(CreateGroup::class) data: MultipartPartDto,
+        @RequestPart("icon", required = false) icon: FilePart?,
+    ): String = "OK"
+
+    @PostMapping(
+        "/v1/testMultipartSharedCreate",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartSharedCreate(
+        @RequestPart("file") file: FilePart,
+        @RequestPart("data") @Validated(CreateGroup::class) data: MultipartSharedDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testMultipartSharedUpdate")
+    fun testMultipartSharedUpdate(
+        @RequestBody @Validated(UpdateGroup::class) body: MultipartSharedDto,
+    ): String = "OK"
+
+    @PostMapping(
+        "/v1/testMultipartUngrouped",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartUngrouped(
+        @RequestPart("data") @Valid data: MultipartUngroupedDto,
+    ): String = "OK"
+
+    @PostMapping(
+        "/v1/testMultipartNested",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartNested(
+        @RequestPart("file") file: FilePart,
+        @RequestPart("data") @Validated(CreateGroup::class) data: MultipartOuterDto,
+    ): String = "OK"
+
+    @PostMapping(
+        "/v1/testMultipartMultiGroup",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartMultiGroup(
+        @RequestPart("data") @Validated(CreateGroup::class, UpdateGroup::class) data: MultipartMultiGroupDto,
+    ): String = "OK"
+
+    // Two object parts on one operation, each pinned to a different group.
+    @PostMapping(
+        "/v1/testMultipartTwoParts",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartTwoParts(
+        @RequestPart("first") @Validated(CreateGroup::class) first: MultipartFirstPartDto,
+        @RequestPart("second") @Validated(UpdateGroup::class) second: MultipartSecondPartDto,
+    ): String = "OK"
+
+    // One pinned part, one @Valid part: the unpinned one must stay on the Default group.
+    @PostMapping(
+        "/v1/testMultipartMixedPins",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartMixedPins(
+        @RequestPart("pinned") @Validated(CreateGroup::class) pinned: MultipartFirstPartDto,
+        @RequestPart("unpinned") @Valid unpinned: MultipartUnpinnedCompanionDto,
+    ): String = "OK"
+
+    @PostMapping(
+        "/v1/testMultipartOrphan",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartOrphan(
+        @RequestPart("data") @Validated(CreateGroup::class) data: MultipartOrphanDto,
+    ): String = "OK"
+
+    @Validated(CreateGroup::class)
+    @PostMapping(
+        "/v1/testMultipartMethodLevel",
+        consumes = [MediaType.MULTIPART_FORM_DATA_VALUE],
+    )
+    fun testMultipartMethodLevel(
+        @RequestPart("data") data: MultipartMethodLevelDto,
+    ): String = "OK"
+
+    // --- group-cloning audit fixtures ---
+
+    @PostMapping("/v1/testHierarchyStrict")
+    fun testHierarchyStrict(
+        @RequestBody @Validated(StrictGroup::class) body: HierarchyDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testSizeMinOnly")
+    fun testSizeMinOnly(@RequestBody @Valid body: SizeMinOnlyDto): String = "OK"
+
+    @PostMapping("/v1/testNonNullGrouped")
+    fun testNonNullGrouped(@RequestBody @Valid body: NonNullGroupedDto): String = "OK"
+
+    @PostMapping("/v1/testTransitiveCreate")
+    fun testTransitiveCreate(
+        @RequestBody @Validated(CreateGroup::class) body: TransitiveOuterDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testTreeCreate")
+    fun testTreeCreate(
+        @RequestBody @Validated(CreateGroup::class) body: TreeDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testMutualRecursionCreate")
+    fun testMutualRecursionCreate(
+        @RequestBody @Validated(CreateGroup::class) body: NodeADto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testListBodyCreate")
+    fun testListBodyCreate(
+        @RequestBody @Validated(CreateGroup::class) body: List<ListElementDto>,
+    ): String = "OK"
+
+    @PostMapping("/v1/testMapBodyCreate")
+    fun testMapBodyCreate(
+        @RequestBody @Validated(CreateGroup::class) body: Map<String, MapValueDto>,
+    ): String = "OK"
+
+    @PostMapping("/v1/testSizeMap")
+    fun testSizeMap(@RequestBody @Valid body: SizeMapDto): String = "OK"
+
+    @PostMapping("/v1/testDedup")
+    fun testDedup(@RequestBody @Valid body: DedupDto): String = "OK"
+
+    @PostMapping("/v1/testQueryObjectCreate")
+    fun testQueryObjectCreate(
+        @ModelAttribute @Validated(CreateGroup::class) filter: QueryObjectDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testOrderCreate")
+    fun testOrderCreate(
+        @RequestBody @Validated(CreateGroup::class) body: Order,
+    ): String = "OK"
+
+    @PostMapping("/v1/testOrderCreateGroupUntouched")
+    fun testOrderCreateGroupUntouched(@RequestBody @Valid body: OrderCreateGroup): String = "OK"
+
+    @PostMapping("/v1/testAmbiguousLocal")
+    fun testAmbiguousLocal(
+        @RequestBody @Validated(CreateGroup::class) body: AmbiguousDto,
+    ): String = "OK"
+
+    @PostMapping("/v1/testParamGroupScoped")
+    fun testParamGroupScoped(
+        @RequestParam @NotBlank(groups = [CreateGroup::class]) code: String,
+    ): String = "OK"
 }

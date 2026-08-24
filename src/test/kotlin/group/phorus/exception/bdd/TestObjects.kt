@@ -1,5 +1,7 @@
 package group.phorus.exception.bdd
 
+import group.phorus.exception.bdd.other.CreateGroup as ForeignCreateGroup
+import io.swagger.v3.oas.annotations.media.Schema as SwaggerSchema
 import jakarta.validation.Valid
 import jakarta.validation.constraints.AssertFalse
 import jakarta.validation.constraints.AssertTrue
@@ -394,19 +396,19 @@ enum class StatusEnum { ACTIVE, INACTIVE }
 
 data class GroupedRichDto(
     @field:jakarta.validation.constraints.NotNull(groups = [CreateGroup::class])
-    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Unique user identifier", title = "User id")
+    @field:SwaggerSchema(description = "Unique user identifier", title = "User id")
     val id: java.util.UUID? = null,
 
     @field:jakarta.validation.constraints.NotBlank(groups = [CreateGroup::class])
-    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Display name", example = "Alice", title = "Name")
+    @field:SwaggerSchema(description = "Display name", example = "Alice", title = "Name")
     val name: String? = null,
 
     @field:jakarta.validation.constraints.Min(value = 5, groups = [CreateGroup::class])
-    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Number of items")
+    @field:SwaggerSchema(description = "Number of items")
     val count: Int? = null,
 
     @field:jakarta.validation.constraints.NotNull(groups = [CreateGroup::class])
-    @field:io.swagger.v3.oas.annotations.media.Schema(description = "Current status", defaultValue = "ACTIVE")
+    @field:SwaggerSchema(description = "Current status", defaultValue = "ACTIVE")
     val status: StatusEnum? = null,
 )
 
@@ -441,3 +443,234 @@ data class ResponseOnlyDto(
     @field:NotBlank
     val name: String? = null,
 )
+
+/**
+ * DTO consumed only by a multipart endpoint, pinned to `CreateGroup` on a `@RequestPart`
+ * rather than a `@RequestBody`. Both annotations pin the same group and Spring enforces
+ * both at runtime, so the per-group clone must be derived for either.
+ */
+data class MultipartPartDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+)
+
+/**
+ * DTO reachable from a multipart endpoint pinned to `CreateGroup` and a JSON endpoint pinned
+ * to `UpdateGroup`, the production shape where one DTO serves create and update. Both clones
+ * must be derived, each carrying only its own group's constraints.
+ */
+data class MultipartSharedDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Size(max = 50, groups = [UpdateGroup::class])
+    val description: String? = null,
+)
+
+/**
+ * DTO consumed by a multipart part carrying `@Valid` and no group pin. No clone should be
+ * derived; the original component keeps its constraints.
+ */
+data class MultipartUngroupedDto(
+    @field:NotBlank
+    val value: String? = null,
+)
+
+/**
+ * DTO consumed by a multipart endpoint whose group pin lives on the method rather than on the
+ * part parameter, mirroring the existing method-level `@RequestBody` case.
+ */
+data class MultipartMethodLevelDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val value: String? = null,
+)
+
+/**
+ * Outer DTO reached from a multipart part, cascading into [MultipartInnerDto]. The customizer
+ * must clone the nested component per active group the same way it does for a request body.
+ */
+data class MultipartOuterDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val inner: MultipartInnerDto? = null,
+)
+
+data class MultipartInnerDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val email: String? = null,
+
+    @field:NotBlank(groups = [UpdateGroup::class])
+    val displayName: String? = null,
+)
+
+/**
+ * DTO whose constraints live in two groups, consumed by a part pinned to both. One combined
+ * clone must carry every active group's entries.
+ */
+data class MultipartMultiGroupDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    @field:Size(max = 100, groups = [UpdateGroup::class])
+    val name: String? = null,
+)
+
+/**
+ * DTO reached only through a grouped multipart part, never through `@Valid`. Once the clone
+ * exists the original has no consumer and must be pruned, as it is for a grouped body.
+ */
+data class MultipartOrphanDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val value: String? = null,
+)
+
+/** First object part of a two-part endpoint, pinned to `CreateGroup`. */
+data class MultipartFirstPartDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+)
+
+/** Second object part of the same endpoint, pinned to a different group. */
+data class MultipartSecondPartDto(
+    @field:NotBlank(groups = [UpdateGroup::class])
+    val label: String? = null,
+)
+
+
+// ---------------------------------------------------------------------------
+// Fixtures for the group-cloning audit. Each block names the behaviour it pins.
+// ---------------------------------------------------------------------------
+
+/** `interface StrictGroup : BasicGroup` — JSR 380 runs BasicGroup constraints for StrictGroup. */
+interface BasicGroup
+interface StrictGroup : BasicGroup
+
+/** Constraint scoped to the super-group; a clone pinned to the sub-group must keep it. */
+data class HierarchyDto(
+    @field:NotBlank(groups = [BasicGroup::class])
+    val name: String? = null,
+)
+
+/** Nullable field whose only constraint is a lower bound: `null` satisfies `@Size`. */
+data class SizeMinOnlyDto(
+    @field:Size(min = 2)
+    val value: String? = null,
+)
+
+/**
+ * Field declared required outside the constraint set, carrying one group-scoped constraint.
+ * Filtering to the default view drops the constraint but the declared presence stands.
+ */
+data class NonNullGroupedDto(
+    @field:Size(max = 10, groups = [CreateGroup::class])
+    @field:SwaggerSchema(requiredMode = SwaggerSchema.RequiredMode.REQUIRED)
+    val name: String,
+)
+
+/** Grouped outer, ungrouped middle, grouped inner: the middle must still be cloned. */
+data class TransitiveOuterDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val middle: TransitiveMiddleDto? = null,
+)
+
+data class TransitiveMiddleDto(
+    @field:Valid
+    val inner: TransitiveInnerDto? = null,
+)
+
+data class TransitiveInnerDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val email: String? = null,
+)
+
+/** Self-referential: the clone's recursive edge must point at the clone. */
+data class TreeDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+
+    @field:Valid
+    val children: List<TreeDto>? = null,
+)
+
+/** Mutually recursive, with the grouped constraint only on the leaf reached from A. */
+data class NodeADto(
+    @field:Valid
+    val b: NodeBDto? = null,
+
+    @field:Valid
+    val leaf: NodeLeafDto? = null,
+)
+
+data class NodeBDto(
+    @field:Valid
+    val a: NodeADto? = null,
+)
+
+data class NodeLeafDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val value: String? = null,
+)
+
+/** Element type of a list-typed body. */
+data class ListElementDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+)
+
+/** Value type of a map-typed body. */
+data class MapValueDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val name: String? = null,
+)
+
+/** Constrained map, for the minProperties / maxProperties rules. */
+data class SizeMapDto(
+    @field:Size(min = 1, max = 5)
+    val entries: Map<String, String>? = null,
+)
+
+/** Two annotations that collapse to the same rule name, to pin de-duplication order. */
+data class DedupDto(
+    @field:PositiveOrZero
+    @field:Min(0)
+    val limit: Int? = null,
+)
+
+/** Bound to a query object, so the payload arrives as a parameter rather than a body. */
+data class QueryObjectDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val term: String? = null,
+)
+
+/** Hand-written component whose name is exactly what a clone of [Order] would be called. */
+data class OrderCreateGroup(
+    @field:NotBlank
+    val unrelated: String? = null,
+)
+
+data class Order(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val reference: String? = null,
+)
+
+/**
+ * One field pinned to this package's `CreateGroup`, one to the same-named group in another
+ * package. Only the first belongs in a clone pinned to this package's group.
+ */
+data class AmbiguousDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val local: String? = null,
+
+    @field:NotBlank(groups = [ForeignCreateGroup::class])
+    val foreign: String? = null,
+)
+
+/** Unpinned companion to a pinned part on the same operation: it runs the Default group. */
+data class MultipartUnpinnedCompanionDto(
+    @field:NotBlank(groups = [CreateGroup::class])
+    val scoped: String? = null,
+)
+

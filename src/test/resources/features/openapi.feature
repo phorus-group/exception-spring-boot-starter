@@ -768,3 +768,243 @@ Feature: OpenAPI integration emits the x-validations extension for fields carryi
     Then the OpenAPI schema "EmailDto" has property "value" with JSON Schema validators
       | key    | value   |
       | format | "email" |
+
+  # A group pinned on a multipart `@RequestPart` is enforced by Spring exactly as one pinned
+  # on a `@RequestBody`. The per-group clone must be derived for both, otherwise the published
+  # contract understates what the server rejects for that operation. The object part sits
+  # alongside binary parts that carry no pin of their own.
+
+  Scenario: Request part pinned to a group gets the per-group clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "MultipartPartDtoCreateGroup"
+
+  Scenario: Request part group clone carries the group-scoped constraint
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "MultipartPartDtoCreateGroup" has property "name" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+    And the OpenAPI schema "MultipartPartDtoCreateGroup" has "name" in its required fields
+
+  Scenario: Multipart body points its object part at the per-group clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI multipart body schema for POST "/v1/testMultipartCreate" part "data" references "MultipartPartDtoCreateGroup"
+
+  # One DTO reached from a multipart create and a JSON update, the shape a CRUD resource takes.
+  # Each operation must see only its own group's constraints.
+
+  Scenario: A DTO shared by a multipart create and a JSON update gets both clones
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "MultipartSharedDtoCreateGroup"
+    And the OpenAPI document declares schema "MultipartSharedDtoUpdateGroup"
+
+  Scenario: Each shared clone carries only its own group's constraints
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "MultipartSharedDtoCreateGroup" has "name" in its required fields
+    And the OpenAPI schema "MultipartSharedDtoCreateGroup" does not have "description" in its required fields
+    And the OpenAPI schema "MultipartSharedDtoUpdateGroup" has property "description" with x-validations
+      | rule      | code     |
+      | maxLength | TOO_LONG |
+    And the OpenAPI schema "MultipartSharedDtoUpdateGroup" has property "name" without an x-validations extension
+
+  Scenario: Multipart create and JSON update each point at their own clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI multipart body schema for POST "/v1/testMultipartSharedCreate" part "data" references "MultipartSharedDtoCreateGroup"
+    And the OpenAPI body schema for POST "/v1/testMultipartSharedUpdate" content type "application/json" references "MultipartSharedDtoUpdateGroup"
+
+  # An unpinned part must behave like an unpinned body: no clone, original keeps its constraints.
+
+  Scenario: Ungrouped request part derives no clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document does not declare schema "MultipartUngroupedDtoCreateGroup"
+    And the OpenAPI schema "MultipartUngroupedDto" has property "value" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+
+  # The pin may live on the method rather than the parameter, as it already may for a body.
+
+  Scenario: Method-level group pin applies to a request part
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "MultipartMethodLevelDtoCreateGroup"
+    And the OpenAPI multipart body schema for POST "/v1/testMultipartMethodLevel" part "data" references "MultipartMethodLevelDtoCreateGroup"
+
+  # A part cascades into nested components exactly as a body does.
+
+  Scenario: A DTO cascaded from a request part is cloned per group
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "MultipartOuterDtoCreateGroup"
+    And the OpenAPI document declares schema "MultipartInnerDtoCreateGroup"
+
+  Scenario: The nested clone reached from a part carries only its group's entries
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "MultipartInnerDtoCreateGroup" has property "email" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+    And the OpenAPI schema "MultipartInnerDtoCreateGroup" has property "displayName" without an x-validations extension
+
+  # Several groups pinned on one part produce a single combined clone, as they do for a body.
+
+  Scenario: A request part pinned to multiple groups produces one combined clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI multipart body schema for POST "/v1/testMultipartMultiGroup" part "data" has property "name" with x-validations
+      | rule      | code     |
+      | notBlank  | BLANK    |
+      | maxLength | TOO_LONG |
+
+  # Once a part's clone exists the original has no consumer and is pruned, as for a grouped body.
+
+  Scenario: A DTO consumed only via a grouped request part leaves no original component
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "MultipartOrphanDtoCreateGroup"
+    And the OpenAPI document does not declare schema "MultipartOrphanDto"
+
+  # Two object parts on one operation, each pinned to its own group.
+
+  Scenario: Each object part on the same operation gets its own group's clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI multipart body schema for POST "/v1/testMultipartTwoParts" part "first" references "MultipartFirstPartDtoCreateGroup"
+    And the OpenAPI multipart body schema for POST "/v1/testMultipartTwoParts" part "second" references "MultipartSecondPartDtoUpdateGroup"
+
+  # --- group-cloning audit ---
+
+  # Every rewrite path must leave the document internally consistent. This one assertion
+  # catches a clone that was reserved but never registered, a discriminator mapping left
+  # pointing at an uncloned subtype, and a component destroyed by a name collision.
+
+  Scenario: Every schema reference in the served document resolves
+    When the caller fetches the OpenAPI document
+    Then every schema reference in the OpenAPI document resolves to a declared component
+
+  # Each part carries its own pin, so each clone must carry only that part's group.
+
+  Scenario: Each part's clone carries only that part's own group entries
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI multipart body schema for POST "/v1/testMultipartTwoParts" part "second" has property "label" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+    And the OpenAPI document does not declare schema "MultipartSecondPartDtoCreateGroup"
+
+  # Jakarta treats null as valid for @Size, so a lower bound is not a presence rule.
+  # @NotEmpty emits the same rule name and does imply presence, so the two must stay distinct.
+
+  Scenario: Size with a lower bound does not make a nullable property required
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "SizeMinOnlyDto" does not have "value" in its required fields
+    And the OpenAPI schema "SizeDto" does not have "value" in its required fields
+    And the OpenAPI schema "SizeListDto" does not have "items" in its required fields
+
+  Scenario: NotEmpty still derives required
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "NotEmptyStringDto" has "value" in its required fields
+    And the OpenAPI schema "NotEmptyListDto" has "items" in its required fields
+
+  # Presence can be declared outside the constraint set, and filtering a group-scoped
+  # constraint out of the default view must not take that declaration with it.
+
+  Scenario: A declared-required field stays required when its only constraint is group-scoped
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "NonNullGroupedDto" has "name" in its required fields
+    And the OpenAPI schema "NonNullGroupedDto" has property "name" without an x-validations extension
+
+  # A DTO with no grouped constraints of its own still needs a clone when a descendant has one.
+
+  Scenario: An ungrouped intermediate is cloned so its grouped descendant is reached
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "TransitiveMiddleDtoCreateGroup"
+    And the OpenAPI schema "TransitiveOuterDtoCreateGroup" property "middle" references "TransitiveMiddleDtoCreateGroup"
+    And the OpenAPI schema "TransitiveMiddleDtoCreateGroup" property "inner" references "TransitiveInnerDtoCreateGroup"
+    And the OpenAPI schema "TransitiveInnerDtoCreateGroup" has "email" in its required fields
+
+  # Cycles must terminate and still point at the clone.
+
+  Scenario: A self-referential DTO points its recursive edge at its own clone
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "TreeDtoCreateGroup"
+    And the OpenAPI schema "TreeDtoCreateGroup" items property "children" references "TreeDtoCreateGroup"
+
+  Scenario: Mutually recursive DTOs are both cloned regardless of which is reached first
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "NodeADtoCreateGroup"
+    And the OpenAPI document declares schema "NodeBDtoCreateGroup"
+    And the OpenAPI schema "NodeADtoCreateGroup" property "b" references "NodeBDtoCreateGroup"
+    And the OpenAPI schema "NodeBDtoCreateGroup" property "a" references "NodeADtoCreateGroup"
+
+  # A body that is a container has no ref of its own; the element type still needs cloning.
+
+  Scenario: A list-typed body clones its element component
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "ListElementDtoCreateGroup"
+    And the OpenAPI body schema for POST "/v1/testListBodyCreate" items references "ListElementDtoCreateGroup"
+
+  Scenario: A map-typed body clones its value component
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "MapValueDtoCreateGroup"
+    And the OpenAPI body schema for POST "/v1/testMapBodyCreate" additionalProperties references "MapValueDtoCreateGroup"
+
+  # Group identity is the class, not its simple name.
+
+  Scenario: A constraint scoped to a super-group applies to a clone pinned to the sub-group
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "HierarchyDtoStrictGroup" has property "name" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+    And the OpenAPI schema "HierarchyDtoStrictGroup" has "name" in its required fields
+
+  Scenario: Two groups sharing a simple name are not treated as the same group
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "AmbiguousDtoCreateGroup" has property "local" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+    And the OpenAPI schema "AmbiguousDtoCreateGroup" has property "foreign" without an x-validations extension
+
+  # A clone must never overwrite a component a consumer declared.
+
+  Scenario: A derived name that collides with a real component does not overwrite it
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "OrderCreateGroup" has property "unrelated" with x-validations
+      | rule     | code  |
+      | notBlank | BLANK |
+
+  # A payload bound as a query object is validated per parameter and needs the same treatment.
+
+  Scenario: A group pinned on a query-object parameter clones the referenced component
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI document declares schema "QueryObjectDtoCreateGroup"
+    And the OpenAPI parameter "filter" for POST "/v1/testQueryObjectCreate" references "QueryObjectDtoCreateGroup"
+
+  # A group-scoped parameter constraint must not be published on an unpinned operation.
+
+  Scenario: A group-scoped parameter constraint is not published unconditionally
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI parameter "code" for POST "/v1/testParamGroupScoped" has no x-validations
+
+  # Constrained maps emit property-count rules.
+
+  Scenario: Size on a map emits property-count entries
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "SizeMapDto" has property "entries" with x-validations
+      | rule          | code      |
+      | minProperties | TOO_SHORT |
+      | maxProperties | TOO_LONG  |
+
+  # Two annotations collapsing to one rule must resolve deterministically.
+
+  Scenario: A body property dedupes constraints that produce the same rule
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "DedupDto" has property "limit" with x-validations
+      | rule    | code                     |
+      | minimum | MUST_BE_POSITIVE_OR_ZERO |
+
+  # Internal bookkeeping must never reach a consumer.
+
+  Scenario: Component schema entries carry no internal keys
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI schema "GroupsDtoCreateGroup" x-validations entries carry no internal keys
+    And the OpenAPI schema "GroupedRichDtoCreateGroup" x-validations entries carry no internal keys
+
+  # A pinned part must not drag an unpinned sibling into its group.
+
+  Scenario: An unpinned part alongside a pinned one stays on the default group
+    When the caller fetches the OpenAPI document
+    Then the OpenAPI multipart body schema for POST "/v1/testMultipartMixedPins" part "unpinned" references "MultipartUnpinnedCompanionDto"
+    And the OpenAPI schema "MultipartUnpinnedCompanionDto" has property "scoped" without an x-validations extension
+    And the OpenAPI document does not declare schema "MultipartUnpinnedCompanionDtoCreateGroup"
