@@ -18,7 +18,7 @@ plugins {
 
 ext["jackson-2-bom.version"] = "2.21.7"
 ext["jackson-bom.version"] = "3.1.7"
-ext["jsoup.version"] = "1.23.1"
+ext["jsoup.version"] = "1.23.2"
 ext["log4j2.version"] = "2.25.5"
 ext["logback.version"] = "1.5.34"
 ext["micrometer.version"] = "1.16.6"
@@ -32,7 +32,7 @@ configurations.all {
             useVersion("1.85")
         }
         if (requested.group == "org.jsoup") {
-            useVersion("1.23.1")
+            useVersion("1.23.2")
         }
     }
 }
