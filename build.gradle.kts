@@ -10,6 +10,7 @@ plugins {
     id("io.spring.dependency-management") version "1.1.7"
     kotlin("plugin.spring") version "2.3.10"
     kotlin("jvm") version "2.3.10"
+    kotlin("kapt") version "2.3.10"
     id("org.jetbrains.dokka").version("2.1.0")
     id("com.vanniktech.maven.publish") version "0.34.0"
     id("com.kageiit.jacobo") version "2.1.0"
@@ -60,7 +61,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-jackson")
     implementation("org.springframework.boot:spring-boot-starter-validation")
-    implementation("org.springframework.boot:spring-boot-configuration-processor")
+    kapt("org.springframework.boot:spring-boot-configuration-processor")
     implementation("org.springframework:spring-tx")
 
     // OpenAPI (optional, only active when springdoc is on classpath)
